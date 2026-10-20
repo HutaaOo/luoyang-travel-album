@@ -112,9 +112,11 @@
     .storage-note { display: flex; gap: 11px; align-items: flex-start; border: 1px solid rgba(198,164,106,.4); background: rgba(231,221,199,.44); padding: 13px 16px; margin: 0 0 24px; color: #6a7061; font-size: 11px; line-height: 1.8; }
     .storage-note strong { color: var(--ink); font-weight: 600; }
     .note-icon { color: var(--gold); flex: 0 0 auto; font-size: 17px; line-height: 1.2; }
-    .album-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; align-items: start; }
-    .location-card { min-width: 0; background: var(--paper-light); border: 1px solid rgba(40,67,51,.13); box-shadow: 0 9px 26px rgba(46,54,39,.035); transition: transform .22s, box-shadow .22s; }
-    .location-card:hover { transform: translateY(-3px); box-shadow: var(--shadow); }
+    /* Responsive location-card grid: aligned on desktop, single-column on phones. */
+    .album-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 22px; row-gap: 22px; align-items: stretch; }
+    .media-error-notice { grid-column: 1 / -1; align-self: start; }
+    .location-card { min-width: 0; display: flex; flex-direction: column; background: var(--paper-light); border: 1px solid rgba(40,67,51,.13); box-shadow: 0 9px 26px rgba(46,54,39,.035); transition: transform .22s, box-shadow .22s; }
+    .location-card:hover { transform: translateY(-2px); box-shadow: var(--shadow); }
     .card-cover { height: 158px; position: relative; overflow: hidden; padding: 16px 17px; display: flex; flex-direction: column; justify-content: space-between; isolation: isolate; }
     .card-cover:before { content: ""; position: absolute; width: 170px; height: 170px; border: 1px solid rgba(255,255,255,.25); border-radius: 50%; right: -47px; top: -65px; z-index: -1; }
     .card-cover:after { content: ""; position: absolute; width: 120px; height: 120px; border: 1px solid rgba(255,255,255,.2); border-radius: 50%; right: -19px; top: -40px; z-index: -1; }
@@ -134,15 +136,19 @@
     .cover-bottom h3 { font: 700 23px/1.2 var(--serif); letter-spacing: .06em; margin: 0 0 4px; }
     .cover-bottom p { font: 10px var(--serif); margin: 0; opacity: .8; letter-spacing: .06em; }
     .cover-symbol { font: 42px/.8 var(--serif); opacity: .28; align-self: center; transform: rotate(-7deg); }
-    .card-body { padding: 15px 16px 17px; }
+    .card-body { padding: 15px 16px 17px; display: flex; flex: 1; flex-direction: column; min-width: 0; }
     .location-blurb { font: 11px/1.9 var(--serif); color: #777d71; min-height: 42px; margin-bottom: 14px; }
     .card-tools { display: flex; justify-content: space-between; align-items: center; gap: 9px; padding-bottom: 12px; border-bottom: 1px solid rgba(24,59,50,.1); }
     .media-count { color: #9b9e91; font-size: 10px; }
     .upload-btn { border: 1px solid rgba(24,59,50,.5); background: transparent; color: var(--ink); border-radius: 2px; padding: 7px 11px; font-size: 11px; display: inline-flex; gap: 7px; align-items: center; white-space: nowrap; transition: .2s; }
     .upload-btn:hover { color: var(--paper-light); background: var(--ink); }
     .upload-btn .plus { font: 17px/10px var(--sans); }
-    .media-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
-    .media-tile { aspect-ratio: 1.07; position: relative; overflow: hidden; background: #eee7d8; border: 1px solid rgba(24,59,50,.09); }
+    .media-collection { min-width: 0; margin-top: 12px; }
+    .media-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .media-tile { aspect-ratio: 1; min-width: 0; position: relative; overflow: hidden; background: #eee7d8; border: 1px solid rgba(24,59,50,.09); }
+    .media-expand { display: none; width: 100%; justify-content: center; align-items: center; gap: 8px; margin-top: 10px; padding: 9px 12px; color: #526a5b; border: 1px solid rgba(24,59,50,.16); background: rgba(231,221,199,.25); border-radius: 2px; font-size: 11px; transition: background .2s, color .2s; }
+    .media-expand:hover { background: var(--ink); color: #fff9ec; }
+    .media-expand[hidden] { display: none !important; }
     .media-open { width: 100%; height: 100%; border: 0; padding: 0; background: #e7e0d1; display: block; position: relative; }
     .media-open img, .media-open video { display: block; width: 100%; height: 100%; object-fit: cover; transition: transform .4s; }
     .media-open:hover img { transform: scale(1.04); }
@@ -187,9 +193,13 @@
     .viewer-media img, .viewer-media video { max-width: 100%; max-height: 74vh; object-fit: contain; }
     .viewer-caption { color: #b7c0b3; font-size: 10px; padding-top: 12px; }
     .auth-user { color: var(--ink); font-size: 11px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    @media (min-width: 651px) {
+      .media-grid:not(.is-expanded) .media-tile.is-overflow { display: none; }
+      .media-expand:not([hidden]) { display: inline-flex; }
+    }
     @media (max-width: 900px) {
       .hero-grid { gap: 28px; }
-      .album-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .album-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 18px; row-gap: 18px; }
       .nav { gap: 18px; }
       .status-pill { display: none; }
     }
@@ -219,9 +229,11 @@
       .section-head { display: block; }
       .gallery-head-tools { justify-content: flex-start; margin-top: 17px; }
       .gallery-section { padding: 40px 0 55px; }
-      .album-grid { grid-template-columns: 1fr; gap: 17px; }
+      .album-grid { grid-template-columns: minmax(0, 1fr); gap: 17px; align-items: stretch; }
+      .location-card { min-height: 0; }
       .card-cover { height: 178px; }
-      .media-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .media-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+      .media-expand { display: none !important; }
       .footer-inner { align-items: flex-start; flex-direction: column; }
       .footer-right { text-align: left; }
     }
@@ -349,7 +361,7 @@
           </div>
         </div>
         <div class="storage-note" id="storageNote" role="status">
-          <span class="note-icon">✳</span><div><strong>相册保存说明</strong><br>请耐心等待，正在加载照片和视频，别离开哦，很快就好(●'◡'●)</div>
+          <span class="note-icon">✳</span><div><strong>相册保存说明</strong><br>当前为本地相册模式：上传内容会保存在当前浏览器和设备中，适合先试用。若要让家人通过同一个网址看到同一批照片，请按压缩包中的 README 配置云端相册。</div>
         </div>
         <div class="album-grid" id="albumGrid" aria-live="polite"></div>
       </div>
@@ -637,6 +649,7 @@
       return `<svg viewBox="0 0 300 180" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><rect width="300" height="180" fill="${sky}"/><circle cx="234" cy="38" r="21" fill="#f2dfb2" opacity=".85"/><circle cx="234" cy="38" r="27" fill="none" stroke="${accent}" opacity=".5"/><path d="M0 105L46 68 81 92 127 47 163 88 212 57 300 105V180H0Z" fill="${accent}" opacity=".23"/><path d="M0 137L57 107 91 123 153 89 207 129 253 104 300 125V180H0Z" fill="${deep}" opacity=".18"/>${subject}<path d="M0 173Q70 160 140 171T300 168" fill="none" stroke="${deep}" opacity=".35"/><g fill="none" stroke="${deep}" opacity=".26"><path d="M18 23h40v1H18zM24 28h28v1H24z"/><path d="M257 149h25v1h-25zM263 154h19v1h-19z"/></g></svg>`;
     }
 
+
     function renderGallery() {
       state.objectUrls.forEach((url) => URL.revokeObjectURL(url)); state.objectUrls = [];
       const admin = isAdminSession();
@@ -644,7 +657,8 @@
       albumGrid.innerHTML = "";
       if (state.mediaError) {
         const notice = document.createElement("div");
-        notice.style.cssText = "grid-column:1/-1;padding:12px 16px;border:1px solid rgba(169,79,59,.25);color:#8b5546;font-size:13px;background:rgba(245,240,229,.7)";
+        notice.className = "media-error-notice";
+        notice.style.cssText = "padding:12px 16px;border:1px solid rgba(169,79,59,.25);color:#8b5546;font-size:13px;background:rgba(245,240,229,.7)";
         notice.textContent = "云端照片暂时未能读取。页面已快速显示；请检查网络后刷新重试。";
         albumGrid.appendChild(notice);
       }
@@ -661,22 +675,32 @@
           <div class="card-body">
             <p class="location-blurb">${escapeHtml(loc.blurb)}</p>
             <div class="card-tools"><span class="media-count">${inLocation.length ? `已收藏 ${inLocation.length} 段影像` : "暂未收录影像"}</span>${admin ? `<button class="upload-btn" type="button" data-upload="${loc.id}"><span class="plus">＋</span>上传照片 / 视频</button>` : ""}</div>
-            <div class="media-grid" data-media-grid="${loc.id}"></div>
+            <div class="media-collection">
+              <div class="media-grid" data-media-grid="${loc.id}"></div>
+              <button class="media-expand" type="button" data-expand-media="${loc.id}" data-total="${inLocation.length}" aria-expanded="false" hidden>查看全部影像 ↓</button>
+            </div>
           </div>`;
         const mediaGrid = card.querySelector(`[data-media-grid="${loc.id}"]`);
+        const expandButton = card.querySelector(`[data-expand-media="${loc.id}"]`);
         if (!inLocation.length) {
           mediaGrid.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><span class="empty-icon">${admin ? "＋" : "◇"}</span><strong>${admin ? (loc.day === 0 ? (state.type === "video" ? "为旅途收藏一段视频" : state.type === "image" ? "收下这张车窗风景" : "把启程时的记忆放在这里") : loc.day === 5 ? (state.type === "video" ? "收下一段旅途片段" : state.type === "image" ? "收藏一张随手拍" : "把零散的旅行记忆放在这里") : (state.type === "video" ? "为这一站添加一段视频" : state.type === "image" ? "为这一站添一张照片" : "把旅途记忆放在这里")) : "影像正在慢慢收集"}</strong><span>${admin ? "支持常见照片与视频格式，也可随后编辑说明" : "此处将展示管理员整理的旅行照片与视频"}</span></div>`;
         } else {
-          for (const item of inLocation) {
+          const desktopPreviewLimit = 6;
+          inLocation.forEach((item, index) => {
             const mediaUrl = item.public_url || (item.blob ? URL.createObjectURL(item.blob) : "");
             if (item.blob && mediaUrl) state.objectUrls.push(mediaUrl);
-            const tile = document.createElement("div"); tile.className = "media-tile";
+            const tile = document.createElement("div");
+            tile.className = `media-tile${index >= desktopPreviewLimit ? " is-overflow" : ""}`;
             const mediaElement = item.media_type === "video"
               ? `<video src="${escapeHtml(mediaUrl)}" muted playsinline preload="metadata"></video><span class="video-badge">视频</span>`
               : `<img src="${escapeHtml(mediaUrl)}" alt="${escapeHtml(item.name)}" loading="lazy" />`;
             const adminTools = admin ? `<div class="media-admin-tools"><button class="media-action" type="button" data-edit="${escapeHtml(item.id)}" title="编辑名称和说明" aria-label="编辑名称和说明">✎</button><button class="media-action" type="button" data-replace="${escapeHtml(item.id)}" title="替换照片或视频" aria-label="替换照片或视频">↻</button><button class="media-action media-action-delete" type="button" data-delete="${escapeHtml(item.id)}" title="删除此影像" aria-label="删除此影像">×</button></div>` : "";
             tile.innerHTML = `<button class="media-open" type="button" data-preview="${escapeHtml(item.id)}" aria-label="预览${escapeHtml(item.name)}">${mediaElement}</button>${adminTools}<div class="media-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</div>`;
             mediaGrid.appendChild(tile);
+          });
+          if (inLocation.length > 6) {
+            expandButton.hidden = false;
+            expandButton.textContent = `查看全部 ${inLocation.length} 段影像 ↓`;
           }
         }
         albumGrid.appendChild(card);
@@ -687,6 +711,14 @@
       albumGrid.querySelectorAll("[data-edit]").forEach((button) => button.addEventListener("click", () => openEditDialog(button.dataset.edit)));
       albumGrid.querySelectorAll("[data-replace]").forEach((button) => button.addEventListener("click", () => requestReplace(button.dataset.replace)));
       albumGrid.querySelectorAll("[data-delete]").forEach((button) => button.addEventListener("click", () => deleteMedia(button.dataset.delete)));
+      albumGrid.querySelectorAll("[data-expand-media]").forEach((button) => button.addEventListener("click", () => {
+        const locId = button.dataset.expandMedia;
+        const mediaGrid = albumGrid.querySelector(`[data-media-grid="${locId}"]`);
+        if (!mediaGrid) return;
+        const expanded = mediaGrid.classList.toggle("is-expanded");
+        button.setAttribute("aria-expanded", String(expanded));
+        button.textContent = expanded ? "收起较晚影像 ↑" : `查看全部 ${button.dataset.total} 段影像 ↓`;
+      }));
     }
 
     async function loadMedia() {
@@ -695,7 +727,7 @@
         const requestTimer = setTimeout(() => controller.abort(), 8000);
         let result;
         try {
-          result = await state.supabase.from("travel_media").select("id,location_id,day,name,media_type,storage_path,caption,created_at,user_id").order("created_at", { ascending: false }).abortSignal(controller.signal);
+          result = await state.supabase.from("travel_media").select("id,location_id,day,name,media_type,storage_path,caption,created_at,user_id").order("created_at", { ascending: true }).order("id", { ascending: true }).abortSignal(controller.signal);
         } catch (error) {
           if (controller.signal.aborted) throw new Error("读取云端相册超过 8 秒，已停止等待。请检查网络后刷新重试。");
           throw error;
@@ -706,7 +738,11 @@
         if (error) throw error;
         state.mediaError = false;
         const bucket = window.ALBUM_CONFIG.BUCKET || "luoyang-travel-album";
-        state.media = (data || []).map((item) => ({ ...item, public_url: state.supabase.storage.from(bucket).getPublicUrl(item.storage_path).data.publicUrl }));
+        state.media = (data || []).map((item) => ({ ...item, public_url: state.supabase.storage.from(bucket).getPublicUrl(item.storage_path).data.publicUrl })).sort((a, b) => {
+          const timeA = Date.parse(a.created_at || "") || 0;
+          const timeB = Date.parse(b.created_at || "") || 0;
+          return timeA - timeB || String(a.id).localeCompare(String(b.id));
+        });
       } else {
         // 未连接云端时只显示公开页面骨架，禁用本地上传/修改，避免出现绕过管理员权限的入口。
         state.media = [];
