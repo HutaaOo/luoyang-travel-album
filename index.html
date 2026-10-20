@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#173b32" />
   <meta name="description" content="洛阳、老君山、开封四日旅行相册。把沿途山水与一家人的回忆，慢慢收进时光里。" />
+  <link rel="preconnect" href="https://unpkg.com" crossorigin />
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+  <link rel="preconnect" href="https://esm.sh" crossorigin />
+  <link rel="preconnect" href="https://jxazzutborbdvxrwkuax.supabase.co" crossorigin />
   <title>河洛行记 · 四日山水相册</title>
   <style>
     :root {
@@ -345,7 +349,7 @@
           </div>
         </div>
         <div class="storage-note" id="storageNote" role="status">
-          <span class="note-icon">✳</span><div><strong>相册保存说明</strong><br>当前为本地相册模式：上传内容会保存在当前浏览器和设备中，适合先试用。若要让家人通过同一个网址看到同一批照片，请按压缩包中的 README 配置云端相册。</div>
+          <span class="note-icon">✳</span><div><strong>相册保存说明</strong><br>请耐心等待，正在加载照片和视频，别离开哦，很快就好(●'◡'●)</div>
         </div>
         <div class="album-grid" id="albumGrid" aria-live="polite"></div>
       </div>
@@ -407,7 +411,7 @@
       { id: "misc", day: 5, name: "杂项", en: "LITTLE MOMENTS", short: "不期而遇的风景", theme: "misc", symbol: "拾", blurb: "收纳不属于固定景点的随手一拍：路边小景、旅途美食、同行趣事，以及那些难以归类却值得留住的瞬间。" }
     ];
 
-    const state = { day: "all", type: "all", media: [], currentLocationId: null, currentMediaId: null, currentEditMediaId: null, session: null, supabase: null, cloud: false, objectUrls: [], toastTimer: null };
+    const state = { day: "all", type: "all", media: [], currentLocationId: null, currentMediaId: null, currentEditMediaId: null, session: null, supabase: null, cloud: false, connecting: false, cloudError: false, mediaError: false, objectUrls: [], toastTimer: null };
     const $ = (sel) => document.querySelector(sel);
     const albumGrid = $("#albumGrid");
     const fileInput = $("#fileInput");
@@ -440,21 +444,136 @@
       state.toastTimer = setTimeout(() => toast.classList.remove("show"), 2900);
     }
     function makeId() { return (crypto && crypto.randomUUID) ? crypto.randomUUID() : `m${Date.now()}${Math.random().toString(16).slice(2)}`; }
-    function safeFileName(name) { return String(name || "media").replace(/[\\/:*?"<>|#%{}\\^~\[\]`]/g, "_").slice(0, 110); }
+    // Supabase Storage object keys should use URL-safe ASCII names. Keep the original
+    // Chinese filename in the database for display, but sanitize only the storage path.
+    function safeFileName(name) {
+      const original = String(name || "media").trim() || "media";
+      const match = original.match(/\.([A-Za-z0-9]{1,10})$/);
+      const extension = match ? `.${match[1].toLowerCase()}` : "";
+      const stem = extension ? original.slice(0, -extension.length) : original;
+      const safeStem = stem
+        .normalize("NFKD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^A-Za-z0-9_-]+/g, "_")
+        .replace(/_+/g, "_")
+        .replace(/^[_-]+|[_-]+$/g, "")
+        .slice(0, 80);
+      return `${safeStem || "media"}${extension}`;
+    }
 
+
+    async function loadSupabaseClient() {
+      if (window.supabase && typeof window.supabase.createClient === "function") return;
+
+      // Fast path: request several CDN sources in parallel instead of waiting for
+      // one source to time out before trying the next. First success wins.
+      // The short timeout keeps a blocked CDN from delaying the whole page.
+      const timeoutMs = 5000;
+      const scriptSources = [
+        "https://unpkg.com/@supabase/supabase-js@2",
+        "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"
+      ];
+      const moduleSource = "https://esm.sh/@supabase/supabase-js@2?bundle";
+      const scripts = new Set();
+      const failures = [];
+
+      function loadUmd(src) {
+        return new Promise((resolve, reject) => {
+          const script = document.createElement("script");
+          scripts.add(script);
+          let settled = false;
+          const finish = (error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(script.__supabaseTimer);
+            if (error) {
+              script.remove();
+              failures.push(`${src}: ${error.message || error}`);
+              reject(error);
+            } else if (window.supabase && typeof window.supabase.createClient === "function") {
+              resolve({ src, script });
+            } else {
+              script.remove();
+              const err = new Error("脚本已加载，但没有提供 createClient");
+              failures.push(`${src}: ${err.message}`);
+              reject(err);
+            }
+          };
+          script.async = true;
+          script.src = src;
+          script.__supabaseTimer = setTimeout(() => finish(new Error("加载超时")), timeoutMs);
+          script.onload = () => finish();
+          script.onerror = () => finish(new Error("网络请求失败"));
+          document.head.appendChild(script);
+        });
+      }
+
+      function loadEsm() {
+        return new Promise((resolve, reject) => {
+          let settled = false;
+          const timer = setTimeout(() => {
+            settled = true;
+            const err = new Error("esm.sh 加载超时");
+            failures.push(`${moduleSource}: ${err.message}`);
+            reject(err);
+          }, timeoutMs);
+          import(moduleSource).then((module) => {
+            if (settled) return;
+            if (module && typeof module.createClient === "function") {
+              window.supabase = { createClient: module.createClient };
+              settled = true;
+              clearTimeout(timer);
+              resolve({ src: moduleSource, script: null });
+            } else {
+              settled = true;
+              clearTimeout(timer);
+              const err = new Error("模块未提供 createClient");
+              failures.push(`${moduleSource}: ${err.message}`);
+              reject(err);
+            }
+          }).catch((error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            failures.push(`${moduleSource}: ${error.message || error}`);
+            reject(error);
+          });
+        });
+      }
+
+      let winner = null;
+      try {
+        winner = await Promise.any([
+          ...scriptSources.map(loadUmd),
+          loadEsm()
+        ]);
+        // Stop the losing UMD downloads and their timeout timers.
+        for (const script of scripts) {
+          if (script !== winner.script) {
+            clearTimeout(script.__supabaseTimer);
+            script.onload = null;
+            script.onerror = null;
+            script.remove();
+          }
+        }
+        try { sessionStorage.setItem("luoyang-supabase-cdn", winner.src); } catch { /* private browsing may disable storage */ }
+        return;
+      } catch (error) {
+        for (const script of scripts) {
+          clearTimeout(script.__supabaseTimer);
+          script.remove();
+        }
+        console.error("Supabase 客户端并行加载失败：", failures, error);
+        throw new Error("云端脚本连接超时。网页已先显示相册框架；请检查网络，稍后刷新重试。已并行尝试备用源，等待时间已限制在约 5 秒。");
+      }
+    }
 
     async function initCloud() {
       const cfg = window.ALBUM_CONFIG || {};
       const hasConfig = Boolean(cfg.SUPABASE_URL && cfg.SUPABASE_ANON_KEY);
       if (!hasConfig) return false;
       if (!window.supabase || typeof window.supabase.createClient !== "function") {
-        await new Promise((resolve, reject) => {
-          const script = document.createElement("script");
-          script.src = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2";
-          script.onload = resolve;
-          script.onerror = () => reject(new Error("云端服务脚本未能加载，请检查网络后刷新页面。"));
-          document.head.appendChild(script);
-        });
+        await loadSupabaseClient();
       }
       if (!window.supabase || typeof window.supabase.createClient !== "function") {
         throw new Error("云端服务脚本未能加载，请检查网络后刷新页面。");
@@ -473,14 +592,22 @@
           ? '<span class="note-icon">✳</span><div><strong>管理员模式已开启</strong><br>访客可直接浏览；你可以上传、替换、修改名称与说明，或删除影像。照片和视频通过公开链接展示，请勿上传证件、住址等敏感内容。</div>'
           : '<span class="note-icon">✳</span><div><strong>欢迎浏览这段旅程</strong><br>照片与视频在此公开展示，无需登录。只有管理员登录后才能上传、替换、编辑说明或删除影像。</div>';
         $("#loginBtn").hidden = admin;
+        $("#loginBtn").disabled = false;
         $("#logoutBtn").hidden = !admin;
         $("#authUser").hidden = !admin;
         $("#authUser").textContent = admin ? "管理员已登录" : "";
         $("#loginBtn").textContent = "管理员登录";
+      } else if (state.connecting) {
+        status.innerHTML = '<i class="status-dot" style="background:#c6a46a"></i><span>正在连接云端</span>';
+        $("#storageNote").innerHTML = '<span class="note-icon">✳</span><div><strong>正在连接云端相册</strong><br>页面已先行显示，正在尝试可用的云端连接方式；照片加载后会自动出现。</div>';
+        $("#loginBtn").hidden = false; $("#loginBtn").disabled = true; $("#loginBtn").textContent = "连接中…";
+        $("#logoutBtn").hidden = true; $("#authUser").hidden = true;
       } else {
-        status.innerHTML = '<i class="status-dot"></i><span>公开展示 · 待连接云端</span>';
-        $("#storageNote").innerHTML = '<span class="note-icon">✳</span><div><strong>公开展示模式</strong><br>网页可以公开访问。请先按 README 配置 Supabase，连接后所有访客即可看到云端相册，只有管理员账号可以管理影像。未配置云端前，上传与修改功能会保持关闭。</div>';
-        $("#loginBtn").hidden = false; $("#loginBtn").textContent = "管理员登录";
+        status.innerHTML = `<i class="status-dot" style="background:${state.cloudError ? '#a94f3b' : '#b9a06a'}"></i><span>${state.cloudError ? '云端暂不可用' : '公开展示 · 待连接云端'}</span>`;
+        $("#storageNote").innerHTML = state.cloudError
+          ? '<span class="note-icon">✳</span><div><strong>云端暂时连接失败</strong><br>页面仍可显示。连接脚本已改为并行尝试，减少逐个超时等待；请检查网络后刷新重试。</div>'
+          : '<span class="note-icon">✳</span><div><strong>公开展示模式</strong><br>网页可以公开访问。请先按 README 配置 Supabase，连接后所有访客即可看到云端相册，只有管理员账号可以管理影像。未配置云端前，上传与修改功能会保持关闭。</div>';
+        $("#loginBtn").hidden = false; $("#loginBtn").disabled = false; $("#loginBtn").textContent = "管理员登录";
         $("#logoutBtn").hidden = true; $("#authUser").hidden = true;
       }
     }
@@ -515,6 +642,12 @@
       const admin = isAdminSession();
       const locations = LOCATIONS.filter((loc) => state.day === "all" || String(loc.day) === String(state.day));
       albumGrid.innerHTML = "";
+      if (state.mediaError) {
+        const notice = document.createElement("div");
+        notice.style.cssText = "grid-column:1/-1;padding:12px 16px;border:1px solid rgba(169,79,59,.25);color:#8b5546;font-size:13px;background:rgba(245,240,229,.7)";
+        notice.textContent = "云端照片暂时未能读取。页面已快速显示；请检查网络后刷新重试。";
+        albumGrid.appendChild(notice);
+      }
       for (const loc of locations) {
         const inLocation = state.media.filter((item) => item.location_id === loc.id && (state.type === "all" || item.media_type === state.type));
         const card = document.createElement("article");
@@ -558,8 +691,20 @@
 
     async function loadMedia() {
       if (state.cloud) {
-        const { data, error } = await state.supabase.from("travel_media").select("id,location_id,day,name,media_type,storage_path,caption,created_at,user_id").order("created_at", { ascending: false });
+        const controller = new AbortController();
+        const requestTimer = setTimeout(() => controller.abort(), 8000);
+        let result;
+        try {
+          result = await state.supabase.from("travel_media").select("id,location_id,day,name,media_type,storage_path,caption,created_at,user_id").order("created_at", { ascending: false }).abortSignal(controller.signal);
+        } catch (error) {
+          if (controller.signal.aborted) throw new Error("读取云端相册超过 8 秒，已停止等待。请检查网络后刷新重试。");
+          throw error;
+        } finally {
+          clearTimeout(requestTimer);
+        }
+        const { data, error } = result;
         if (error) throw error;
+        state.mediaError = false;
         const bucket = window.ALBUM_CONFIG.BUCKET || "luoyang-travel-album";
         state.media = (data || []).map((item) => ({ ...item, public_url: state.supabase.storage.from(bucket).getPublicUrl(item.storage_path).data.publicUrl }));
       } else {
@@ -770,14 +915,32 @@
     viewerDialog.addEventListener("close", () => { $("#viewerMedia").innerHTML = ""; });
 
     async function init() {
-      try { await initCloud(); }
-      catch (error) { console.error(error); showToast(error.message); }
+      // Render the page immediately. Cloud initialization continues afterward so
+      // a slow network never leaves the gallery area blank while CDNs are tried.
+      renderGallery();
+      state.connecting = Boolean(window.ALBUM_CONFIG && window.ALBUM_CONFIG.SUPABASE_URL && window.ALBUM_CONFIG.SUPABASE_ANON_KEY);
+      updateModeUI();
+      try {
+        await initCloud();
+      } catch (error) {
+        state.connecting = false;
+        state.cloudError = true;
+        console.error(error);
+        updateModeUI();
+        showToast("云端连接暂时未成功，页面已显示；请检查网络后刷新");
+        return;
+      }
+      state.connecting = false;
+      state.cloudError = false;
       await setupAuth();
       updateModeUI();
-      try { await loadMedia(); }
-      catch (error) {
-        console.error(error); albumGrid.innerHTML = '<p style="color:#8b5546;font-size:13px;grid-column:1/-1">相册读取失败，请检查云端配置、数据表与存储权限后刷新页面。</p>';
-        showToast("读取相册失败，请检查设置");
+      try {
+        await loadMedia();
+      } catch (error) {
+        console.error(error);
+        state.mediaError = true;
+        renderGallery();
+        showToast("云端照片读取超时或失败，请检查网络后刷新");
       }
       updateModeUI();
     }
