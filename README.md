@@ -16,7 +16,7 @@
 1. 解压下载的 ZIP 文件。
 2. 在 GitHub 创建一个新仓库，将 `index.html`、`README.md` 和 `supabase-setup.sql` 上传到仓库根目录。
 3. 打开仓库 **Settings → Pages**，在 **Build and deployment** 选择 `Deploy from a branch`，分支选择 `main`，目录选择 `/(root)`，保存。
-4. 下一步配置 Supabase 后，再次提交修改好的 `index.html`。
+4. 当前版本的 `index.html` 已预填你提供的 Supabase Project URL 与 Publishable key，上传后即可连接该项目；管理员账号和数据库权限仍需按下文完成配置。
 
 ## 二、配置共享相册与管理员账号
 
@@ -48,7 +48,7 @@ window.ALBUM_CONFIG = {
 };
 ```
 
-将 `SUPABASE_URL` 和 `SUPABASE_ANON_KEY` 填上，其他值保持不变。然后将修改后的文件提交到 GitHub，等待 Pages 重新部署。
+当前提供的部署包已将 `SUPABASE_URL` 和 `SUPABASE_ANON_KEY` 填入为你提供的项目值。如果你使用此项目，通常不需要再修改这两项；上传新版 `index.html` 到 GitHub 并等待 Pages 部署即可。
 
 **只使用 anon / publishable key。绝对不要把 Supabase `service_role` 或 secret key 放到公开网页。** anon / publishable key 本身会公开，真正保护写入权限的是 SQL 中的 RLS 策略。
 
