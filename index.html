@@ -150,7 +150,8 @@
     .media-expand:hover { background: var(--ink); color: #fff9ec; }
     .media-expand[hidden] { display: none !important; }
     .media-open { width: 100%; height: 100%; border: 0; padding: 0; background: #e7e0d1; display: block; position: relative; }
-    .media-open img, .media-open video { display: block; width: 100%; height: 100%; object-fit: cover; transition: transform .4s; }
+    .media-open img, .media-open video { display: block; width: 100%; height: 100%; object-fit: cover; transition: transform .4s; background: #e9dfce; }
+    .media-open img { content-visibility: auto; }
     .media-open:hover img { transform: scale(1.04); }
     .video-badge { position: absolute; left: 7px; bottom: 7px; display: inline-flex; align-items: center; gap: 5px; background: rgba(18,45,37,.8); color: white; padding: 4px 6px; border-radius: 2px; font-size: 9px; }
     .video-badge:before { content: "▶"; font-size: 8px; }
@@ -473,6 +474,103 @@
       return `${safeStem || "media"}${extension}`;
     }
 
+    // Build public Storage URLs without needing the full Supabase SDK. This lets the
+    // public gallery fetch its small metadata payload immediately, while the auth SDK
+    // is still loading in the background.
+    function publicStorageUrl(path) {
+      const cfg = window.ALBUM_CONFIG || {};
+      const bucket = String(cfg.BUCKET || "luoyang-travel-album");
+      const safePath = String(path || "").split("/").map((part) => encodeURIComponent(part)).join("/");
+      return `${String(cfg.SUPABASE_URL || "").replace(/\/+$/, "")}/storage/v1/object/public/${encodeURIComponent(bucket)}/${safePath}`;
+    }
+
+    function normalizeMediaRows(rows) {
+      return (Array.isArray(rows) ? rows : []).map((item) => ({
+        ...item,
+        public_url: publicStorageUrl(item.storage_path)
+      })).sort((a, b) => {
+        const timeA = Date.parse(a.created_at || "") || 0;
+        const timeB = Date.parse(b.created_at || "") || 0;
+        return timeA - timeB || String(a.id).localeCompare(String(b.id));
+      });
+    }
+
+    const MEDIA_CACHE_KEY = `luoyang-media-cache-v2:${(window.ALBUM_CONFIG || {}).SUPABASE_URL || "default"}`;
+    function readMediaCache() {
+      try {
+        const cached = JSON.parse(localStorage.getItem(MEDIA_CACHE_KEY) || "null");
+        if (!cached || !Array.isArray(cached.items) || Date.now() - Number(cached.savedAt || 0) > 7 * 24 * 60 * 60 * 1000) return null;
+        return normalizeMediaRows(cached.items);
+      } catch { return null; }
+    }
+
+    function writeMediaCache(rows) {
+      try {
+        // Only public metadata is cached; credentials/session data are never stored here.
+        localStorage.setItem(MEDIA_CACHE_KEY, JSON.stringify({ savedAt: Date.now(), items: rows.map(({ public_url, ...item }) => item) }));
+      } catch { /* Storage may be full or unavailable in private browsing. */ }
+    }
+
+    async function fetchPublicMediaDirect(timeoutMs = 6500) {
+      const cfg = window.ALBUM_CONFIG || {};
+      if (!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY) return [];
+      const fields = "id,location_id,day,name,media_type,storage_path,caption,created_at,user_id";
+      const endpoint = `${String(cfg.SUPABASE_URL).replace(/\/+$/, "")}/rest/v1/travel_media?select=${encodeURIComponent(fields)}&order=created_at.asc,id.asc`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(endpoint, {
+          method: "GET",
+          headers: {
+            // Publishable keys are API keys, not JWTs. Send them via apikey only;
+            // do not place sb_publishable_* in Authorization: Bearer.
+            apikey: cfg.SUPABASE_ANON_KEY,
+            Accept: "application/json"
+          },
+          signal: controller.signal,
+          cache: "no-store"
+        });
+        if (!response.ok) {
+          const detail = await response.text().catch(() => "");
+          throw new Error(`读取云端照片失败（${response.status}）${detail.slice(0, 160)}`);
+        }
+        return await response.json();
+      } catch (error) {
+        if (controller.signal.aborted) throw new Error("云端照片目录连接超过 6.5 秒；若已有缓存，页面会先显示缓存内容。");
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    async function optimizeImageForUpload(file) {
+      // Resize/compress large phone photos before uploading. This especially helps
+      // visitors on mobile data. Original display names remain in the database.
+      if (!file || !["image/jpeg", "image/png", "image/webp"].includes(file.type) || file.size < 450 * 1024 || typeof createImageBitmap !== "function") return file;
+      let bitmap;
+      try {
+        bitmap = await createImageBitmap(file);
+        const maxDimension = 1920;
+        const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height));
+        const width = Math.max(1, Math.round(bitmap.width * scale));
+        const height = Math.max(1, Math.round(bitmap.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext("2d", { alpha: true });
+        if (!context) return file;
+        context.drawImage(bitmap, 0, 0, width, height);
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/webp", 0.82));
+        if (!blob || blob.size >= file.size * 0.94) return file;
+        const stem = String(file.name || "photo").replace(/\.[^.]+$/, "") || "photo";
+        return new File([blob], `${stem}.webp`, { type: "image/webp", lastModified: file.lastModified || Date.now() });
+      } catch (error) {
+        console.warn("图片压缩未完成，将上传原文件：", error);
+        return file;
+      } finally {
+        if (bitmap && typeof bitmap.close === "function") bitmap.close();
+      }
+    }
 
     async function loadSupabaseClient() {
       if (window.supabase && typeof window.supabase.createClient === "function") return;
@@ -611,13 +709,13 @@
         $("#loginBtn").textContent = "管理员登录";
       } else if (state.connecting) {
         status.innerHTML = '<i class="status-dot" style="background:#c6a46a"></i><span>正在连接云端</span>';
-        $("#storageNote").innerHTML = '<span class="note-icon">✳</span><div><strong>正在连接云端相册</strong><br>页面已先行显示，正在尝试可用的云端连接方式；照片加载后会自动出现。</div>';
+        $("#storageNote").innerHTML = '<span class="note-icon">✳</span><div><strong>正在连接云端相册</strong><br>照片列表会优先通过轻量接口加载，管理员登录服务在后台连接；若曾访问过，也会先显示本机缓存。</div>';
         $("#loginBtn").hidden = false; $("#loginBtn").disabled = true; $("#loginBtn").textContent = "连接中…";
         $("#logoutBtn").hidden = true; $("#authUser").hidden = true;
       } else {
         status.innerHTML = `<i class="status-dot" style="background:${state.cloudError ? '#a94f3b' : '#b9a06a'}"></i><span>${state.cloudError ? '云端暂不可用' : '公开展示 · 待连接云端'}</span>`;
         $("#storageNote").innerHTML = state.cloudError
-          ? '<span class="note-icon">✳</span><div><strong>云端暂时连接失败</strong><br>页面仍可显示。连接脚本已改为并行尝试，减少逐个超时等待；请检查网络后刷新重试。</div>'
+          ? '<span class="note-icon">✳</span><div><strong>云端暂时连接失败</strong><br>公开照片列表独立加载；管理员管理服务暂不可用。请检查网络后重试管理员登录。</div>'
           : '<span class="note-icon">✳</span><div><strong>公开展示模式</strong><br>网页可以公开访问。请先按 README 配置 Supabase，连接后所有访客即可看到云端相册，只有管理员账号可以管理影像。未配置云端前，上传与修改功能会保持关闭。</div>';
         $("#loginBtn").hidden = false; $("#loginBtn").disabled = false; $("#loginBtn").textContent = "管理员登录";
         $("#logoutBtn").hidden = true; $("#authUser").hidden = true;
@@ -662,6 +760,7 @@
         notice.textContent = "云端照片暂时未能读取。页面已快速显示；请检查网络后刷新重试。";
         albumGrid.appendChild(notice);
       }
+      let firstImagePrioritized = false;
       for (const loc of locations) {
         const inLocation = state.media.filter((item) => item.location_id === loc.id && (state.type === "all" || item.media_type === state.type));
         const card = document.createElement("article");
@@ -691,9 +790,11 @@
             if (item.blob && mediaUrl) state.objectUrls.push(mediaUrl);
             const tile = document.createElement("div");
             tile.className = `media-tile${index >= desktopPreviewLimit ? " is-overflow" : ""}`;
+            const prioritizeImage = item.media_type === "image" && !firstImagePrioritized;
+            if (prioritizeImage) firstImagePrioritized = true;
             const mediaElement = item.media_type === "video"
-              ? `<video src="${escapeHtml(mediaUrl)}" muted playsinline preload="metadata"></video><span class="video-badge">视频</span>`
-              : `<img src="${escapeHtml(mediaUrl)}" alt="${escapeHtml(item.name)}" loading="lazy" />`;
+              ? `<video src="${escapeHtml(mediaUrl)}" muted playsinline preload="none"></video><span class="video-badge">视频</span>`
+              : `<img src="${escapeHtml(mediaUrl)}" alt="${escapeHtml(item.name)}" loading="${prioritizeImage ? "eager" : "lazy"}" decoding="async" fetchpriority="${prioritizeImage ? "high" : "auto"}" />`;
             const adminTools = admin ? `<div class="media-admin-tools"><button class="media-action" type="button" data-edit="${escapeHtml(item.id)}" title="编辑名称和说明" aria-label="编辑名称和说明">✎</button><button class="media-action" type="button" data-replace="${escapeHtml(item.id)}" title="替换照片或视频" aria-label="替换照片或视频">↻</button><button class="media-action media-action-delete" type="button" data-delete="${escapeHtml(item.id)}" title="删除此影像" aria-label="删除此影像">×</button></div>` : "";
             tile.innerHTML = `<button class="media-open" type="button" data-preview="${escapeHtml(item.id)}" aria-label="预览${escapeHtml(item.name)}">${mediaElement}</button>${adminTools}<div class="media-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</div>`;
             mediaGrid.appendChild(tile);
@@ -721,32 +822,36 @@
       }));
     }
 
-    async function loadMedia() {
-      if (state.cloud) {
+    async function loadMedia(options = {}) {
+      const cfg = window.ALBUM_CONFIG || {};
+      let data = [];
+      if (options.preferRest || !state.supabase) {
+        data = await fetchPublicMediaDirect();
+      } else if (state.cloud && state.supabase) {
         const controller = new AbortController();
-        const requestTimer = setTimeout(() => controller.abort(), 8000);
+        const requestTimer = setTimeout(() => controller.abort(), 6500);
         let result;
         try {
-          result = await state.supabase.from("travel_media").select("id,location_id,day,name,media_type,storage_path,caption,created_at,user_id").order("created_at", { ascending: true }).order("id", { ascending: true }).abortSignal(controller.signal);
+          result = await state.supabase.from("travel_media")
+            .select("id,location_id,day,name,media_type,storage_path,caption,created_at,user_id")
+            .order("created_at", { ascending: true }).order("id", { ascending: true })
+            .abortSignal(controller.signal);
         } catch (error) {
-          if (controller.signal.aborted) throw new Error("读取云端相册超过 8 秒，已停止等待。请检查网络后刷新重试。");
+          if (controller.signal.aborted) throw new Error("读取云端相册超过 6.5 秒，已停止等待。请检查网络后刷新重试。");
           throw error;
         } finally {
           clearTimeout(requestTimer);
         }
-        const { data, error } = result;
-        if (error) throw error;
-        state.mediaError = false;
-        const bucket = window.ALBUM_CONFIG.BUCKET || "luoyang-travel-album";
-        state.media = (data || []).map((item) => ({ ...item, public_url: state.supabase.storage.from(bucket).getPublicUrl(item.storage_path).data.publicUrl })).sort((a, b) => {
-          const timeA = Date.parse(a.created_at || "") || 0;
-          const timeB = Date.parse(b.created_at || "") || 0;
-          return timeA - timeB || String(a.id).localeCompare(String(b.id));
-        });
+        if (result.error) throw result.error;
+        data = result.data || [];
       } else {
-        // 未连接云端时只显示公开页面骨架，禁用本地上传/修改，避免出现绕过管理员权限的入口。
         state.media = [];
+        renderGallery();
+        return;
       }
+      state.mediaError = false;
+      state.media = normalizeMediaRows(data);
+      writeMediaCache(data);
       renderGallery();
     }
 
@@ -784,15 +889,16 @@
       if (accepted.length !== files.length) showToast("已跳过不支持的文件类型");
       try {
         showToast(`正在保存到「${loc.day === 0 ? "车窗手记" : loc.name}」…`);
-        for (const file of accepted) {
+        for (const originalFile of accepted) {
           const id = makeId();
-          const mediaType = file.type.startsWith("video/") ? "video" : "image";
+          const mediaType = originalFile.type.startsWith("video/") ? "video" : "image";
+          const file = mediaType === "image" ? await optimizeImageForUpload(originalFile) : originalFile;
           const createdAt = new Date().toISOString();
           const bucket = window.ALBUM_CONFIG.BUCKET || "luoyang-travel-album";
           const path = `${state.session.user.id}/${id}-${safeFileName(file.name)}`;
-          const uploaded = await state.supabase.storage.from(bucket).upload(path, file, { cacheControl: "3600", upsert: false, contentType: file.type || undefined });
+          const uploaded = await state.supabase.storage.from(bucket).upload(path, file, { cacheControl: "31536000", upsert: false, contentType: file.type || undefined });
           if (uploaded.error) throw uploaded.error;
-          const inserted = await state.supabase.from("travel_media").insert({ id, location_id: loc.id, day: loc.day, name: file.name, media_type: mediaType, storage_path: path, caption: "", user_id: state.session.user.id, created_at: createdAt });
+          const inserted = await state.supabase.from("travel_media").insert({ id, location_id: loc.id, day: loc.day, name: originalFile.name, media_type: mediaType, storage_path: path, caption: "", user_id: state.session.user.id, created_at: createdAt });
           if (inserted.error) {
             await state.supabase.storage.from(bucket).remove([path]);
             throw inserted.error;
@@ -814,12 +920,13 @@
       if (!item || !file) return;
       if (!(file.type.startsWith("image/") || file.type.startsWith("video/"))) { showToast("请选择照片或视频文件"); return; }
       const bucket = window.ALBUM_CONFIG.BUCKET || "luoyang-travel-album";
-      const nextPath = `${state.session.user.id}/${makeId()}-${safeFileName(file.name)}`;
+      const nextType = file.type.startsWith("video/") ? "video" : "image";
+      const uploadFile = nextType === "image" ? await optimizeImageForUpload(file) : file;
+      const nextPath = `${state.session.user.id}/${makeId()}-${safeFileName(uploadFile.name)}`;
       try {
-        showToast("正在替换影像…");
-        const uploaded = await state.supabase.storage.from(bucket).upload(nextPath, file, { cacheControl: "3600", upsert: false, contentType: file.type || undefined });
+        showToast("正在优化并替换影像…");
+        const uploaded = await state.supabase.storage.from(bucket).upload(nextPath, uploadFile, { cacheControl: "31536000", upsert: false, contentType: uploadFile.type || undefined });
         if (uploaded.error) throw uploaded.error;
-        const nextType = file.type.startsWith("video/") ? "video" : "image";
         const updated = await state.supabase.from("travel_media").update({ name: file.name, media_type: nextType, storage_path: nextPath, caption: item.caption || "" }).eq("id", item.id);
         if (updated.error) {
           await state.supabase.storage.from(bucket).remove([nextPath]);
@@ -951,32 +1058,47 @@
     viewerDialog.addEventListener("close", () => { $("#viewerMedia").innerHTML = ""; });
 
     async function init() {
-      // Render the page immediately. Cloud initialization continues afterward so
-      // a slow network never leaves the gallery area blank while CDNs are tried.
+      // First paint: use recently cached public metadata immediately, then refresh it.
+      // Public photo listing uses direct PostgREST fetch in parallel with SDK loading,
+      // so a blocked CDN can no longer hold the first photos hostage.
+      const cachedMedia = readMediaCache();
+      if (cachedMedia && cachedMedia.length) state.media = cachedMedia;
       renderGallery();
       state.connecting = Boolean(window.ALBUM_CONFIG && window.ALBUM_CONFIG.SUPABASE_URL && window.ALBUM_CONFIG.SUPABASE_ANON_KEY);
       updateModeUI();
-      try {
-        await initCloud();
-      } catch (error) {
-        state.connecting = false;
-        state.cloudError = true;
-        console.error(error);
-        updateModeUI();
-        showToast("云端连接暂时未成功，页面已显示；请检查网络后刷新");
-        return;
-      }
-      state.connecting = false;
-      state.cloudError = false;
-      await setupAuth();
-      updateModeUI();
-      try {
-        await loadMedia();
-      } catch (error) {
-        console.error(error);
-        state.mediaError = true;
-        renderGallery();
-        showToast("云端照片读取超时或失败，请检查网络后刷新");
+
+      const mediaTask = (async () => {
+        try {
+          await loadMedia({ preferRest: true });
+        } catch (error) {
+          console.error("公共相册列表读取失败：", error);
+          state.mediaError = true;
+          renderGallery();
+          if (!state.media.length) showToast("云端照片目录连接失败，请检查网络后重试");
+        }
+      })();
+
+      const authTask = (async () => {
+        try {
+          await initCloud();
+          state.connecting = false;
+          state.cloudError = false;
+          await setupAuth();
+          updateModeUI();
+          renderGallery();
+        } catch (error) {
+          state.connecting = false;
+          state.cloudError = true;
+          console.error("管理员服务初始化失败（公开照片列表仍可独立读取）：", error);
+          updateModeUI();
+        }
+      })();
+
+      await Promise.allSettled([mediaTask, authTask]);
+      // If the direct REST route failed but the SDK came up, retry once using SDK.
+      if (state.mediaError && state.cloud) {
+        try { await loadMedia(); }
+        catch (error) { console.error("SDK 备用相册读取也失败：", error); }
       }
       updateModeUI();
     }
