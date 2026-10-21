@@ -115,6 +115,21 @@
     .thumbnail-tools .small-btn { font-size: 11px; padding: 6px 10px; }
     .thumbnail-tools .small-btn:disabled { opacity: .55; cursor: wait; }
     .thumbnail-tools-status { color: #7b806f; font-size: 10px; }
+    .thumbnail-maintenance { margin: -8px 0 24px; padding: 16px 18px; border: 1px solid rgba(82, 117, 85, .3); border-left: 4px solid #5c8060; border-radius: 4px; background: rgba(237, 242, 231, .86); color: #425a47; }
+    .thumbnail-maintenance[hidden] { display: none !important; }
+    .thumbnail-maintenance-head { display: flex; align-items: flex-start; gap: 12px; }
+    .thumbnail-maintenance-icon { display: grid; place-items: center; flex: 0 0 34px; width: 34px; height: 34px; border-radius: 50%; background: #dce8d9; color: #3f6748; font-size: 18px; }
+    .thumbnail-maintenance-title { margin: 0 0 3px; font: 600 15px/1.5 var(--serif); color: var(--ink); }
+    .thumbnail-maintenance-desc { margin: 0; color: #6f786b; font-size: 12px; line-height: 1.8; }
+    .thumbnail-maintenance-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 12px 0 0 46px; }
+    .thumbnail-maintenance-actions .primary-btn { padding: 9px 14px; font-size: 12px; }
+    .thumbnail-maintenance-count { color: #6f786b; font-size: 11px; }
+    .thumbnail-auto-progress { margin: 13px 0 0 46px; }
+    .thumbnail-auto-progress-track { height: 6px; width: 100%; overflow: hidden; border-radius: 99px; background: rgba(82,117,85,.15); }
+    .thumbnail-auto-progress-track span { display: block; height: 100%; border-radius: inherit; background: #5c8060; transition: width .2s ease; }
+    .thumbnail-auto-progress-meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 6px; color: #6f786b; font-size: 11px; }
+    @media (max-width: 600px) { .thumbnail-auto-progress { margin-left: 0; } }
+    @media (max-width: 600px) { .thumbnail-maintenance { padding: 13px; } .thumbnail-maintenance-actions { margin-left: 0; } .thumbnail-maintenance-title { font-size: 14px; } }
     .video-thumb-placeholder { display: grid; place-items: center; width: 100%; height: 100%; color: #f9f3e7; background: linear-gradient(145deg, #8da193, #274b3f); position: relative; }
     .video-thumb-placeholder .play-mark { display: grid; place-items: center; width: 38px; height: 38px; border: 1px solid rgba(255,255,255,.7); border-radius: 50%; background: rgba(15,43,34,.28); font-size: 15px; padding-left: 2px; }
     .video-thumb-placeholder .video-badge { position: absolute; left: 7px; bottom: 7px; }
@@ -371,6 +386,7 @@
         <div class="storage-note" id="storageNote" role="status">
           <span class="note-icon">✳</span><div><strong>相册保存说明</strong><br>当前为本地相册模式：上传内容会保存在当前浏览器和设备中，适合先试用。若要让家人通过同一个网址看到同一批照片，请按压缩包中的 README 配置云端相册。</div>
         </div>
+        <section class="thumbnail-maintenance" id="thumbnailMaintenancePanel" hidden aria-live="polite"></section>
         <div class="album-grid" id="albumGrid" aria-live="polite"></div>
       </div>
     </section>
@@ -431,7 +447,7 @@
       { id: "misc", day: 5, name: "杂项", en: "LITTLE MOMENTS", short: "不期而遇的风景", theme: "misc", symbol: "拾", blurb: "收纳不属于固定景点的随手一拍：路边小景、旅途美食、同行趣事，以及那些难以归类却值得留住的瞬间。" }
     ];
 
-    const state = { day: "all", type: "all", media: [], currentLocationId: null, currentMediaId: null, currentEditMediaId: null, session: null, supabase: null, cloud: false, connecting: false, cloudError: false, mediaError: false, objectUrls: [], toastTimer: null };
+    const state = { day: "all", type: "all", media: [], currentLocationId: null, currentMediaId: null, currentEditMediaId: null, session: null, supabase: null, cloud: false, connecting: false, cloudError: false, mediaError: false, objectUrls: [], toastTimer: null, thumbnailBackfillRunning: false, thumbnailBackfillUserId: null, thumbnailBackfillAttemptedUserId: null, thumbnailBackfillCompleted: 0, thumbnailBackfillFailed: 0, thumbnailBackfillTotal: 0, thumbnailBackfillStatus: "" };
     const $ = (sel) => document.querySelector(sel);
     const albumGrid = $("#albumGrid");
     const fileInput = $("#fileInput");
@@ -744,17 +760,53 @@
       return true;
     }
 
+    function updateThumbnailMaintenancePanel() {
+      const panel = $("#thumbnailMaintenancePanel");
+      if (!panel) return;
+      if (!state.cloud || !isAdminSession()) {
+        panel.hidden = true;
+        panel.innerHTML = "";
+        return;
+      }
+      const imageItems = state.media.filter((item) => item.media_type === "image");
+      const missing = imageItems.filter((item) => !item.thumbnail_path).length;
+      const total = Math.max(state.thumbnailBackfillTotal, missing);
+      panel.hidden = false;
+
+      if (!imageItems.length) {
+        panel.innerHTML = '<div class="thumbnail-maintenance-head"><div class="thumbnail-maintenance-icon">✦</div><div><h3 class="thumbnail-maintenance-title">照片加载优化</h3><p class="thumbnail-maintenance-desc">相册读取完成后，若发现旧照片缺少缩略图，系统会在管理员登录后自动补齐，无需手动操作。</p></div></div>';
+        return;
+      }
+
+      if (state.thumbnailBackfillRunning) {
+        const done = state.thumbnailBackfillCompleted + state.thumbnailBackfillFailed;
+        const percent = state.thumbnailBackfillTotal ? Math.min(100, Math.round(done / state.thumbnailBackfillTotal * 100)) : 0;
+        const failureNote = state.thumbnailBackfillFailed ? `，其中 ${state.thumbnailBackfillFailed} 张暂时失败` : "";
+        panel.innerHTML = `<div class="thumbnail-maintenance-head"><div class="thumbnail-maintenance-icon">↻</div><div><h3 class="thumbnail-maintenance-title">正在自动优化旧照片</h3><p class="thumbnail-maintenance-desc">管理员登录后自动逐张生成缩略图，原图会完整保留。请保持此页面打开；处理期间仍可浏览相册。</p></div></div><div class="thumbnail-auto-progress"><div class="thumbnail-auto-progress-track"><span style="width:${percent}%"></span></div><div class="thumbnail-auto-progress-meta"><span>已处理 ${done} / ${state.thumbnailBackfillTotal} 张</span><span>${percent}%${failureNote}</span></div></div>`;
+        return;
+      }
+
+      if (missing === 0) {
+        const hasStatus = Boolean(state.thumbnailBackfillStatus);
+        const statusText = state.thumbnailBackfillStatus || `当前 ${imageItems.length} 张照片均有缩略图；以后新上传的照片也会自动生成。`;
+        panel.innerHTML = `<div class="thumbnail-maintenance-head"><div class="thumbnail-maintenance-icon">✓</div><div><h3 class="thumbnail-maintenance-title">照片加载优化</h3><p class="thumbnail-maintenance-desc">${escapeHtml(statusText)}</p></div></div><div class="thumbnail-maintenance-actions"><span class="thumbnail-maintenance-count">已检查 ${imageItems.length} 张照片</span></div>`;
+      } else if (state.thumbnailBackfillAttemptedUserId === state.session?.user?.id) {
+        const resultText = state.thumbnailBackfillFailed
+          ? `本次自动处理完成：成功 ${state.thumbnailBackfillCompleted} 张，${state.thumbnailBackfillFailed} 张失败。未完成的照片会在下次管理员登录时自动重试。`
+          : `还有 ${missing} 张旧照片缺少缩略图；系统会在下次管理员登录时自动继续处理。`;
+        panel.innerHTML = `<div class="thumbnail-maintenance-head"><div class="thumbnail-maintenance-icon">!</div><div><h3 class="thumbnail-maintenance-title">旧照片缩略图待补齐</h3><p class="thumbnail-maintenance-desc">${escapeHtml(resultText)}</p></div></div><div class="thumbnail-maintenance-actions"><span class="thumbnail-maintenance-count">共 ${imageItems.length} 张照片 · ${imageItems.length - missing} 张已有缩略图</span></div>`;
+      } else {
+        panel.innerHTML = `<div class="thumbnail-maintenance-head"><div class="thumbnail-maintenance-icon">↧</div><div><h3 class="thumbnail-maintenance-title">正在准备自动优化</h3><p class="thumbnail-maintenance-desc">发现 ${missing} 张旧照片还没有缩略图。系统会在管理员登录后自动逐张生成，无需点击按钮；原始照片不会被删除。</p></div></div><div class="thumbnail-maintenance-actions"><span class="thumbnail-maintenance-count">共 ${imageItems.length} 张照片 · ${imageItems.length - missing} 张已有缩略图</span></div>`;
+      }
+    }
+
     function updateModeUI() {
       const status = $("#storageStatus");
       const admin = isAdminSession();
       if (state.cloud) {
         status.innerHTML = '<i class="status-dot" style="background:#6f9b76"></i><span>公开浏览 · 云端相册</span>';
-        const missingThumbnails = state.media.filter((item) => item.media_type === "image" && !item.thumbnail_path).length;
-        const thumbnailTools = missingThumbnails
-          ? `<div class="thumbnail-tools"><button class="small-btn" type="button" id="generateThumbsBtn">为已有照片生成缩略图（${missingThumbnails}）</button><span class="thumbnail-tools-status">首次处理旧照片时会逐张读取原图；完成后访客加载会更快。</span></div>`
-          : '<div class="thumbnail-tools"><span class="thumbnail-tools-status">已有照片缩略图已齐全；新上传照片会自动生成缩略图。</span></div>';
         $("#storageNote").innerHTML = admin
-          ? `<span class="note-icon">✳</span><div><strong>管理员模式已开启</strong><br>访客可直接浏览；你可以上传、替换、修改名称与说明，或删除影像。照片和视频通过公开链接展示，请勿上传证件、住址等敏感内容。${thumbnailTools}</div>`
+          ? '<span class="note-icon">✳</span><div><strong>管理员模式已开启</strong><br>访客可直接浏览；你可以上传、替换、修改名称与说明，或删除影像。照片和视频通过公开链接展示，请勿上传证件、住址等敏感内容。</div>'
           : '<span class="note-icon">✳</span><div><strong>欢迎浏览这段旅程</strong><br>照片与视频在此公开展示，无需登录。只有管理员登录后才能上传、替换、编辑说明或删除影像。</div>';
         $("#loginBtn").hidden = admin;
         $("#loginBtn").disabled = false;
@@ -775,6 +827,7 @@
         $("#loginBtn").hidden = false; $("#loginBtn").disabled = false; $("#loginBtn").textContent = "管理员登录";
         $("#logoutBtn").hidden = true; $("#authUser").hidden = true;
       }
+      updateThumbnailMaintenancePanel();
     }
 
     function artworkSvg(location) {
@@ -916,6 +969,7 @@
       writeMediaCache(data);
       renderGallery();
       if (state.cloud) updateModeUI();
+      if (isAdminSession()) maybeAutoGenerateMissingThumbnails();
     }
 
     function requestUpload(locationId) {
@@ -1041,42 +1095,97 @@
     }
 
     async function generateMissingThumbnails() {
-      if (!requireAdmin()) return;
-      const button = $("#generateThumbsBtn");
+      if (!requireAdmin() || state.thumbnailBackfillRunning) return;
+      const userId = state.session?.user?.id;
+      if (!userId) return;
       const missing = state.media.filter((item) => item.media_type === "image" && !item.thumbnail_path);
-      if (!missing.length) { showToast("所有照片都已有缩略图"); updateModeUI(); return; }
-      if (!window.confirm(`将为 ${missing.length} 张旧照片逐张生成缩略图。首次处理会下载原图一次，完成后访客加载将更快。继续吗？`)) return;
-      const bucket = window.ALBUM_CONFIG.BUCKET || "luoyang-travel-album";
-      if (button) { button.disabled = true; button.textContent = `正在处理 0 / ${missing.length}…`; }
-      let completed = 0, failed = 0;
-      for (const item of missing) {
-        try {
-          const response = await fetch(item.public_url, { cache: "force-cache" });
-          if (!response.ok) throw new Error(`原图下载失败（${response.status}）`);
-          const originalBlob = await response.blob();
-          const thumbnailBlob = await createThumbnailBlob(originalBlob, 560);
-          const ext = thumbnailBlob.type === "image/jpeg" ? "jpg" : "webp";
-          const thumbnailPath = `${state.session.user.id}/thumbs/${item.id}.${ext}`;
-          // Remove an orphaned thumbnail from a previous interrupted attempt before
-          // re-uploading. This avoids requiring Storage UPDATE/upsert permissions.
-          await state.supabase.storage.from(bucket).remove([thumbnailPath]).catch(() => {});
-          const uploaded = await state.supabase.storage.from(bucket).upload(thumbnailPath, thumbnailBlob, { cacheControl: "31536000", upsert: false, contentType: thumbnailBlob.type || "image/webp" });
-          if (uploaded.error) throw uploaded.error;
-          const updated = await state.supabase.from("travel_media").update({ thumbnail_path: thumbnailPath }).eq("id", item.id);
-          if (updated.error) {
-            await state.supabase.storage.from(bucket).remove([thumbnailPath]);
-            throw updated.error;
-          }
-          completed++;
-        } catch (error) {
-          failed++;
-          console.warn(`为「${item.name}」生成缩略图失败：`, error);
-        }
-        if (button) button.textContent = `正在处理 ${completed + failed} / ${missing.length}…`;
+      if (!missing.length) {
+        state.thumbnailBackfillAttemptedUserId = userId;
+        state.thumbnailBackfillStatus = `检查完成：${state.media.filter((item) => item.media_type === "image").length} 张照片均已登记缩略图。`;
+        updateThumbnailMaintenancePanel();
+        return;
       }
-      await loadMedia();
-      updateModeUI();
-      showToast(failed ? `缩略图完成 ${completed} 张，失败 ${failed} 张；可再次点击重试` : `已为 ${completed} 张旧照片生成缩略图`);
+
+      state.thumbnailBackfillRunning = true;
+      state.thumbnailBackfillUserId = userId;
+      state.thumbnailBackfillAttemptedUserId = userId;
+      state.thumbnailBackfillCompleted = 0;
+      state.thumbnailBackfillFailed = 0;
+      state.thumbnailBackfillTotal = missing.length;
+      state.thumbnailBackfillStatus = "正在后台逐张处理旧照片";
+      updateThumbnailMaintenancePanel();
+
+      const bucket = window.ALBUM_CONFIG.BUCKET || "luoyang-travel-album";
+      let completed = 0, failed = 0;
+      try {
+        for (const item of missing) {
+          // Stop safely if the administrator logs out or the account changes mid-run.
+          if (!isAdminSession() || state.session?.user?.id !== userId) break;
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 30000);
+            let response;
+            try { response = await fetch(item.public_url, { cache: "force-cache", signal: controller.signal }); }
+            finally { clearTimeout(timeoutId); }
+            if (!response.ok) throw new Error(`原图下载失败（${response.status}）`);
+            const originalBlob = await response.blob();
+            const thumbnailBlob = await createThumbnailBlob(originalBlob, 560);
+            const ext = thumbnailBlob.type === "image/jpeg" ? "jpg" : "webp";
+            const thumbnailPath = `${userId}/thumbs/${item.id}.${ext}`;
+            // Clear a thumbnail left behind by an interrupted previous attempt.
+            await state.supabase.storage.from(bucket).remove([thumbnailPath]).catch(() => {});
+            const uploaded = await state.supabase.storage.from(bucket).upload(thumbnailPath, thumbnailBlob, { cacheControl: "31536000", upsert: false, contentType: thumbnailBlob.type || "image/webp" });
+            if (uploaded.error) throw uploaded.error;
+            const updated = await state.supabase.from("travel_media").update({ thumbnail_path: thumbnailPath }).eq("id", item.id);
+            if (updated.error) {
+              await state.supabase.storage.from(bucket).remove([thumbnailPath]);
+              throw updated.error;
+            }
+            completed++;
+          } catch (error) {
+            failed++;
+            console.warn(`为「${item.name}」自动生成缩略图失败：`, error);
+          }
+          state.thumbnailBackfillCompleted = completed;
+          state.thumbnailBackfillFailed = failed;
+          updateThumbnailMaintenancePanel();
+          // Yield to the browser between images so mobile scrolling and taps remain responsive.
+          await new Promise((resolve) => setTimeout(resolve, 120));
+        }
+        state.thumbnailBackfillStatus = failed
+          ? `本次自动处理完成：成功 ${completed} 张，${failed} 张失败；失败项会在下次管理员登录时自动重试。`
+          : `已自动为 ${completed} 张旧照片生成缩略图，原始照片均已保留。`;
+        if (completed || failed) await loadMedia();
+      } catch (error) {
+        state.thumbnailBackfillStatus = `自动生成缩略图暂时中断：${error.message || "云端请求失败"}。刷新或下次管理员登录后会继续检查。`;
+        console.error("自动补齐旧照片缩略图失败：", error);
+      } finally {
+        state.thumbnailBackfillRunning = false;
+        state.thumbnailBackfillUserId = null;
+        updateModeUI();
+      }
+      if (!isAdminSession()) return;
+      if (failed) showToast(`旧照片优化完成：成功 ${completed} 张，${failed} 张未完成；下次登录会自动重试`);
+      else if (completed) showToast(`已自动优化 ${completed} 张旧照片，后续浏览将优先加载缩略图`);
+    }
+
+    function maybeAutoGenerateMissingThumbnails() {
+      if (!isAdminSession() || !state.media.length) return;
+      const userId = state.session?.user?.id;
+      if (!userId || state.thumbnailBackfillRunning || state.thumbnailBackfillAttemptedUserId === userId) return;
+      const missing = state.media.some((item) => item.media_type === "image" && !item.thumbnail_path);
+      if (missing) {
+        // Defer just enough for the login state and gallery to settle; no user click is needed.
+        setTimeout(() => {
+          if (isAdminSession() && state.session?.user?.id === userId && !state.thumbnailBackfillRunning && state.thumbnailBackfillAttemptedUserId !== userId) {
+            void generateMissingThumbnails();
+          }
+        }, 350);
+      } else {
+        state.thumbnailBackfillAttemptedUserId = userId;
+        state.thumbnailBackfillStatus = `检查完成：${state.media.filter((item) => item.media_type === "image").length} 张照片均已登记缩略图。`;
+        updateThumbnailMaintenancePanel();
+      }
     }
 
     async function saveMediaEdits(event) {
@@ -1138,15 +1247,17 @@
           state.supabase.auth.signOut();
         } else {
           state.session = session;
+          if (!session) {
+            state.thumbnailBackfillAttemptedUserId = null;
+            state.thumbnailBackfillStatus = "";
+          }
         }
         updateModeUI(); renderGallery();
+        if (isAdminSession()) maybeAutoGenerateMissingThumbnails();
       });
       updateModeUI();
+      if (isAdminSession()) maybeAutoGenerateMissingThumbnails();
     }
-
-    $("#storageNote").addEventListener("click", (event) => {
-      if (event.target.closest("#generateThumbsBtn")) generateMissingThumbnails();
-    });
     $("#loginBtn").addEventListener("click", () => {
       if (!state.cloud) {
         showToast("请先按 README 配置 Supabase 云端相册，再启用管理员登录");
@@ -1157,7 +1268,7 @@
     $("#logoutBtn").addEventListener("click", async () => {
       if (!state.supabase) return;
       const { error } = await state.supabase.auth.signOut();
-      if (error) showToast(error.message); else { state.session = null; updateModeUI(); renderGallery(); showToast("已退出管理员模式"); }
+      if (error) showToast(error.message); else { state.session = null; state.thumbnailBackfillAttemptedUserId = null; state.thumbnailBackfillStatus = ""; updateModeUI(); renderGallery(); showToast("已退出管理员模式"); }
     });
     $("#loginForm").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -1174,7 +1285,7 @@
           await state.supabase.auth.signOut();
           throw new Error("该账号没有管理员权限");
         }
-        state.session = data.session; updateModeUI(); authDialog.close(); renderGallery(); showToast("管理员登录成功");
+        state.session = data.session; updateModeUI(); authDialog.close(); renderGallery(); showToast("管理员登录成功"); maybeAutoGenerateMissingThumbnails();
       } catch (error) { showToast(error.message || "登录失败，请检查账号和密码"); }
       finally { button.disabled = false; button.textContent = "登录管理"; }
     });
