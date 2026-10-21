@@ -215,6 +215,15 @@
     .viewer-media { display: grid; place-items: center; min-height: 180px; max-height: 74vh; }
     .viewer-media img, .viewer-media video { max-width: 100%; max-height: 74vh; object-fit: contain; }
     .viewer-caption { color: #b7c0b3; font-size: 10px; padding-top: 12px; }
+    .viewer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 12px; }
+    .viewer-actions[hidden] { display: none !important; }
+    .viewer-action-btn { border: 1px solid rgba(224,204,156,.55); color: #f8f1e3; background: rgba(255,255,255,.06); border-radius: 3px; padding: 7px 11px; font-size: 11px; }
+    .viewer-action-btn:hover { background: rgba(224,204,156,.18); }
+    .viewer-action-btn:disabled { opacity: .5; cursor: wait; }
+    .viewer-load-status { color: #b7c0b3; font-size: 10px; }
+    .viewer-media img { opacity: 1; transition: opacity .18s ease; }
+    .viewer-media img.viewer-image-upgrading { opacity: .82; }
+    .media-open img.image-load-failed { object-fit: contain; padding: 12px; }
     .auth-user { color: var(--ink); font-size: 11px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     @media (min-width: 651px) {
       .media-grid:not(.is-expanded) .media-tile.is-overflow { display: none; }
@@ -423,7 +432,12 @@
   </dialog>
 
   <dialog id="viewerDialog" class="viewer-dialog">
-    <div class="viewer-inner"><div class="viewer-top"><div id="viewerTitle" class="viewer-title"></div><button class="dialog-close" type="button" data-close="viewerDialog" aria-label="关闭预览">×</button></div><div id="viewerMedia" class="viewer-media"></div><div id="viewerCaption" class="viewer-caption"></div></div>
+    <div class="viewer-inner">
+      <div class="viewer-top"><div id="viewerTitle" class="viewer-title"></div><button class="dialog-close" type="button" data-close="viewerDialog" aria-label="关闭预览">×</button></div>
+      <div id="viewerMedia" class="viewer-media"></div>
+      <div id="viewerCaption" class="viewer-caption"></div>
+      <div id="viewerActions" class="viewer-actions" hidden><button id="viewerOriginalBtn" class="viewer-action-btn" type="button">查看原图</button><button id="viewerDownloadBtn" class="viewer-action-btn" type="button">下载原图</button><span id="viewerLoadStatus" class="viewer-load-status" aria-live="polite"></span></div>
+    </div>
   </dialog>
 
   <script>
@@ -447,7 +461,7 @@
       { id: "misc", day: 5, name: "杂项", en: "LITTLE MOMENTS", short: "不期而遇的风景", theme: "misc", symbol: "拾", blurb: "收纳不属于固定景点的随手一拍：路边小景、旅途美食、同行趣事，以及那些难以归类却值得留住的瞬间。" }
     ];
 
-    const state = { day: "all", type: "all", media: [], currentLocationId: null, currentMediaId: null, currentEditMediaId: null, session: null, supabase: null, cloud: false, connecting: false, cloudError: false, mediaError: false, objectUrls: [], toastTimer: null, thumbnailBackfillRunning: false, thumbnailBackfillUserId: null, thumbnailBackfillAttemptedUserId: null, thumbnailBackfillCompleted: 0, thumbnailBackfillFailed: 0, thumbnailBackfillTotal: 0, thumbnailBackfillStatus: "" };
+    const state = { day: "all", type: "all", media: [], currentLocationId: null, currentMediaId: null, currentEditMediaId: null, session: null, supabase: null, cloud: false, connecting: false, cloudError: false, mediaError: false, authReady: false, objectUrls: [], toastTimer: null, thumbnailBackfillRunning: false, thumbnailBackfillUserId: null, thumbnailBackfillAttemptedUserId: null, thumbnailBackfillCompleted: 0, thumbnailBackfillFailed: 0, thumbnailBackfillTotal: 0, thumbnailBackfillStatus: "", thumbnailBackfillStage: "", thumbnailBackfillVerifyCompleted: 0, thumbnailBackfillRetryRequested: false, expandedLocations: new Set(), currentViewerMediaId: null, viewerOriginalRequested: false };
     const $ = (sel) => document.querySelector(sel);
     const albumGrid = $("#albumGrid");
     const fileInput = $("#fileInput");
@@ -479,6 +493,22 @@
       toast.textContent = message; toast.classList.add("show"); clearTimeout(state.toastTimer);
       state.toastTimer = setTimeout(() => toast.classList.remove("show"), 2900);
     }
+    function flagImageVariantUnavailable(item, field) {
+      if (!item || item[field]) return;
+      item[field] = true;
+      // If the administrator is currently connected, repair a missing/broken public
+      // derivative automatically. A transient visitor error is remembered in memory
+      // and will be considered when the administrator opens the management session.
+      if (isAdminSession()) {
+        state.thumbnailBackfillAttemptedUserId = null;
+        if (state.thumbnailBackfillRunning) {
+          state.thumbnailBackfillRetryRequested = true;
+          return;
+        }
+        maybeAutoGenerateMissingThumbnails();
+      }
+    }
+
     function makeId() { return (crypto && crypto.randomUUID) ? crypto.randomUUID() : `m${Date.now()}${Math.random().toString(16).slice(2)}`; }
     // Supabase Storage object keys should use URL-safe ASCII names. Keep the original
     // Chinese filename in the database for display, but sanitize only the storage path.
@@ -508,18 +538,28 @@
     }
 
     function normalizeMediaRows(rows) {
-      return (Array.isArray(rows) ? rows : []).map((item) => ({
-        ...item,
-        public_url: publicStorageUrl(item.storage_path),
-        thumbnail_url: item.thumbnail_path ? publicStorageUrl(item.thumbnail_path) : ""
-      })).sort((a, b) => {
+      const previousById = new Map((state.media || []).map((item) => [item.id, item]));
+      return (Array.isArray(rows) ? rows : []).map((item) => {
+        const previous = previousById.get(item.id);
+        const sameThumbnail = previous && previous.thumbnail_path === item.thumbnail_path;
+        const samePreview = previous && previous.preview_path === item.preview_path;
+        return {
+          ...item,
+          // Keep in-memory broken-path signals only while the persisted path is unchanged.
+          thumbnail_unavailable: Boolean(sameThumbnail && previous.thumbnail_unavailable),
+          preview_unavailable: Boolean(samePreview && previous.preview_unavailable),
+          public_url: publicStorageUrl(item.storage_path),
+          preview_url: item.preview_path ? publicStorageUrl(item.preview_path) : "",
+          thumbnail_url: item.thumbnail_path ? publicStorageUrl(item.thumbnail_path) : ""
+        };
+      }).sort((a, b) => {
         const timeA = Date.parse(a.created_at || "") || 0;
         const timeB = Date.parse(b.created_at || "") || 0;
         return timeA - timeB || String(a.id).localeCompare(String(b.id));
       });
     }
 
-    const MEDIA_CACHE_KEY = `luoyang-media-cache-v3:${(window.ALBUM_CONFIG || {}).SUPABASE_URL || "default"}`;
+    const MEDIA_CACHE_KEY = `luoyang-media-cache-v4:${(window.ALBUM_CONFIG || {}).SUPABASE_URL || "default"}`;
     function readMediaCache() {
       try {
         const cached = JSON.parse(localStorage.getItem(MEDIA_CACHE_KEY) || "null");
@@ -539,103 +579,98 @@
       const cfg = window.ALBUM_CONFIG || {};
       if (!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY) return [];
       const base = `${String(cfg.SUPABASE_URL).replace(/\/+$/, "")}/rest/v1/travel_media`;
-      const fields = "id,location_id,day,name,media_type,storage_path,thumbnail_path,caption,created_at,user_id";
-      const legacyFields = "id,location_id,day,name,media_type,storage_path,caption,created_at,user_id";
+      const fieldSets = [
+        "id,location_id,day,name,media_type,storage_path,thumbnail_path,preview_path,caption,created_at,user_id",
+        "id,location_id,day,name,media_type,storage_path,thumbnail_path,caption,created_at,user_id",
+        "id,location_id,day,name,media_type,storage_path,caption,created_at,user_id"
+      ];
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
-      const send = async (selectedFields) => {
-        const endpoint = `${base}?select=${encodeURIComponent(selectedFields)}&order=created_at.asc,id.asc`;
-        return fetch(endpoint, {
-          method: "GET",
-          headers: {
-            // Publishable keys are API keys, not JWTs. Send them via apikey only;
-            // do not place sb_publishable_* in Authorization: Bearer.
-            apikey: cfg.SUPABASE_ANON_KEY,
-            Accept: "application/json"
-          },
-          signal: controller.signal,
-          cache: "no-store"
-        });
-      };
+      const send = async (selectedFields) => fetch(`${base}?select=${encodeURIComponent(selectedFields)}&order=created_at.asc,id.asc`, {
+        method: "GET",
+        headers: { apikey: cfg.SUPABASE_ANON_KEY, Accept: "application/json" },
+        signal: controller.signal,
+        cache: "default"
+      });
       try {
-        let response = await send(fields);
+        let response = await send(fieldSets[0]);
+        let detail = "";
         if (!response.ok) {
-          const detail = await response.text().catch(() => "");
-          // Keep public browsing working while an existing project awaits the one-time
-          // thumbnail_path migration. Uploading thumbnails requires that migration.
-          if (response.status === 400 && /thumbnail_path|column .* does not exist/i.test(detail)) {
-            response = await send(legacyFields);
-          } else {
-            throw new Error(`读取云端照片失败（${response.status}）${detail.slice(0, 160)}`);
+          detail = await response.text().catch(() => "");
+          if (response.status === 400 && /preview_path|column .* does not exist/i.test(detail)) {
+            response = await send(fieldSets[1]);
+            if (!response.ok) detail = await response.text().catch(() => "");
+          }
+          if (!response.ok && response.status === 400 && /thumbnail_path|column .* does not exist/i.test(detail)) {
+            response = await send(fieldSets[2]);
+            if (!response.ok) detail = await response.text().catch(() => "");
           }
         }
-        if (!response.ok) {
-          const detail = await response.text().catch(() => "");
-          throw new Error(`读取云端照片失败（${response.status}）${detail.slice(0, 160)}`);
-        }
+        if (!response.ok) throw new Error(`读取云端照片失败（${response.status}）${detail.slice(0, 160)}`);
         return await response.json();
       } catch (error) {
-        if (controller.signal.aborted) throw new Error("云端照片目录连接超过 6.5 秒；若已有缓存，页面会先显示缓存内容。");
+        if (controller.signal.aborted) throw new Error(`云端照片目录连接超过 ${timeoutMs / 1000} 秒；若已有缓存，页面会先显示缓存内容。`);
         throw error;
       } finally {
         clearTimeout(timer);
       }
     }
 
-    async function prepareImageVariants(file) {
-      // Preserve the uploaded original untouched for full-size viewing. Only create a
-      // compact WebP/JPEG derivative for the gallery grid, decoded once on-device.
-      if (!file || !file.type.startsWith("image/") || typeof createImageBitmap !== "function") {
-        return { mainFile: file, thumbnailBlob: null };
-      }
+    async function encodeCanvas(canvas, quality) {
+      const webp = await new Promise((resolve) => canvas.toBlob(resolve, "image/webp", quality));
+      if (webp && webp.type === "image/webp") return webp;
+      // A few browsers may not encode WebP. Flatten transparency before JPEG fallback.
+      const flattened = document.createElement("canvas");
+      flattened.width = canvas.width;
+      flattened.height = canvas.height;
+      const ctx = flattened.getContext("2d");
+      if (!ctx) throw new Error("无法创建图片压缩画布");
+      ctx.fillStyle = "#f8f3e8";
+      ctx.fillRect(0, 0, flattened.width, flattened.height);
+      ctx.drawImage(canvas, 0, 0);
+      const jpeg = await new Promise((resolve) => flattened.toBlob(resolve, "image/jpeg", Math.min(.86, quality + .08)));
+      if (jpeg) return jpeg;
+      if (webp) return webp;
+      throw new Error("浏览器无法编码图片格式");
+    }
+
+    function variantExtension(blob) {
+      if (blob?.type === "image/jpeg") return "jpg";
+      if (blob?.type === "image/png") return "png";
+      return "webp";
+    }
+
+    async function createImageVariants(fileOrBlob) {
+      if (typeof createImageBitmap !== "function") throw new Error("当前浏览器不支持图片优化，请使用新版浏览器。");
       let bitmap;
       try {
-        bitmap = await createImageBitmap(file);
-        const largestSide = Math.max(bitmap.width, bitmap.height);
-        const thumbScale = Math.min(1, 560 / largestSide);
-        const thumbCanvas = document.createElement("canvas");
-        thumbCanvas.width = Math.max(1, Math.round(bitmap.width * thumbScale));
-        thumbCanvas.height = Math.max(1, Math.round(bitmap.height * thumbScale));
-        const thumbContext = thumbCanvas.getContext("2d", { alpha: true });
-        if (!thumbContext) return { mainFile: file, thumbnailBlob: null };
-        thumbContext.drawImage(bitmap, 0, 0, thumbCanvas.width, thumbCanvas.height);
-        let thumbnailBlob = await new Promise((resolve) => thumbCanvas.toBlob(resolve, "image/webp", 0.72));
-        // JPEG fallback for browsers that cannot encode WebP canvas output.
-        if (!thumbnailBlob) {
-          thumbContext.save();
-          thumbContext.globalCompositeOperation = "destination-over";
-          thumbContext.fillStyle = "#f8f3e8";
-          thumbContext.fillRect(0, 0, thumbCanvas.width, thumbCanvas.height);
-          thumbContext.restore();
-          thumbnailBlob = await new Promise((resolve) => thumbCanvas.toBlob(resolve, "image/jpeg", 0.76));
-        }
-        return { mainFile: file, thumbnailBlob };
-      } catch (error) {
-        console.warn("缩略图生成失败，将保留并上传原图：", error);
-        return { mainFile: file, thumbnailBlob: null };
+        bitmap = await createImageBitmap(fileOrBlob);
+        const makeVariant = async (maxDimension, quality) => {
+          const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height));
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+          canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+          const context = canvas.getContext("2d", { alpha: true });
+          if (!context) throw new Error("无法创建图片画布");
+          context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+          return encodeCanvas(canvas, quality);
+        };
+        // Reuse one decoded bitmap to generate both screen-sized variants.
+        const previewBlob = await makeVariant(1920, .82);
+        const thumbnailBlob = await makeVariant(560, .72);
+        return { previewBlob, thumbnailBlob };
       } finally {
         if (bitmap && typeof bitmap.close === "function") bitmap.close();
       }
     }
 
-    async function createThumbnailBlob(fileOrBlob, maxDimension = 560) {
-      if (typeof createImageBitmap !== "function") throw new Error("当前浏览器不支持图片缩略图生成，请换用新版浏览器。");
-      let bitmap;
+    async function prepareImageVariants(file) {
+      if (!file || !file.type.startsWith("image/")) return { mainFile: file, previewBlob: null, thumbnailBlob: null };
       try {
-        bitmap = await createImageBitmap(fileOrBlob);
-        const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height));
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-        canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-        const context = canvas.getContext("2d", { alpha: true });
-        if (!context) throw new Error("无法创建图片画布");
-        context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-        let blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/webp", 0.72));
-        if (!blob) blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.76));
-        if (!blob) throw new Error("浏览器无法压缩这张图片");
-        return blob;
-      } finally {
-        if (bitmap && typeof bitmap.close === "function") bitmap.close();
+        return { mainFile: file, ...(await createImageVariants(file)) };
+      } catch (error) {
+        console.warn("图片预览版本生成失败，将保留并上传原图：", error);
+        return { mainFile: file, previewBlob: null, thumbnailBlob: null };
       }
     }
 
@@ -769,34 +804,40 @@
         return;
       }
       const imageItems = state.media.filter((item) => item.media_type === "image");
-      const missing = imageItems.filter((item) => !item.thumbnail_path).length;
-      const total = Math.max(state.thumbnailBackfillTotal, missing);
+      const missing = imageItems.filter((item) => !item.thumbnail_path || !item.preview_path || item.thumbnail_unavailable || item.preview_unavailable).length;
       panel.hidden = false;
 
       if (!imageItems.length) {
-        panel.innerHTML = '<div class="thumbnail-maintenance-head"><div class="thumbnail-maintenance-icon">✦</div><div><h3 class="thumbnail-maintenance-title">照片加载优化</h3><p class="thumbnail-maintenance-desc">相册读取完成后，若发现旧照片缺少缩略图，系统会在管理员登录后自动补齐，无需手动操作。</p></div></div>';
+        panel.innerHTML = '<div class="thumbnail-maintenance-head"><div class="thumbnail-maintenance-icon">✦</div><div><h3 class="thumbnail-maintenance-title">照片加载优化</h3><p class="thumbnail-maintenance-desc">相册读取完成后，若旧照片缺少缩略图或高清预览图，系统会在管理员登录后自动补齐，无需手动操作。</p></div></div>';
         return;
       }
 
       if (state.thumbnailBackfillRunning) {
-        const done = state.thumbnailBackfillCompleted + state.thumbnailBackfillFailed;
-        const percent = state.thumbnailBackfillTotal ? Math.min(100, Math.round(done / state.thumbnailBackfillTotal * 100)) : 0;
+        const isChecking = state.thumbnailBackfillStage === "checking";
+        const done = isChecking ? state.thumbnailBackfillVerifyCompleted : state.thumbnailBackfillCompleted;
+        const basePercent = state.thumbnailBackfillTotal ? Math.min(100, Math.round(done / state.thumbnailBackfillTotal * 100)) : 0;
+        const percent = isChecking ? Math.round(basePercent * .45) : 45 + Math.round(basePercent * .55);
         const failureNote = state.thumbnailBackfillFailed ? `，其中 ${state.thumbnailBackfillFailed} 张暂时失败` : "";
-        panel.innerHTML = `<div class="thumbnail-maintenance-head"><div class="thumbnail-maintenance-icon">↻</div><div><h3 class="thumbnail-maintenance-title">正在自动优化旧照片</h3><p class="thumbnail-maintenance-desc">管理员登录后自动逐张生成缩略图，原图会完整保留。请保持此页面打开；处理期间仍可浏览相册。</p></div></div><div class="thumbnail-auto-progress"><div class="thumbnail-auto-progress-track"><span style="width:${percent}%"></span></div><div class="thumbnail-auto-progress-meta"><span>已处理 ${done} / ${state.thumbnailBackfillTotal} 张</span><span>${percent}%${failureNote}</span></div></div>`;
+        const title = isChecking ? "正在检查已有展示图" : "正在补齐旧照片展示图";
+        const desc = isChecking
+          ? "逐张检查缩略图和高清预览图的实际访问状态；只有缺失或失效的版本才会重新生成，不会重复处理完好的图片。"
+          : "后台逐张生成约 560px 缩略图和最长边 1920px 高清预览图，原图会完整保留。处理期间仍可浏览相册，请保持管理员页面打开。";
+        const progressLabel = isChecking ? `已检查 ${done} / ${state.thumbnailBackfillTotal} 张` : `已处理 ${done} / ${state.thumbnailBackfillTotal} 张`;
+        panel.innerHTML = `<div class="thumbnail-maintenance-head"><div class="thumbnail-maintenance-icon">↻</div><div><h3 class="thumbnail-maintenance-title">${title}</h3><p class="thumbnail-maintenance-desc">${desc}</p></div></div><div class="thumbnail-auto-progress"><div class="thumbnail-auto-progress-track"><span style="width:${percent}%"></span></div><div class="thumbnail-auto-progress-meta"><span>${progressLabel}</span><span>${percent}%${failureNote}</span></div></div>`;
         return;
       }
 
       if (missing === 0) {
         const hasStatus = Boolean(state.thumbnailBackfillStatus);
-        const statusText = state.thumbnailBackfillStatus || `当前 ${imageItems.length} 张照片均有缩略图；以后新上传的照片也会自动生成。`;
+        const statusText = state.thumbnailBackfillStatus || `当前 ${imageItems.length} 张照片的缩略图与高清预览图已检查；以后新上传的照片也会自动生成。`;
         panel.innerHTML = `<div class="thumbnail-maintenance-head"><div class="thumbnail-maintenance-icon">✓</div><div><h3 class="thumbnail-maintenance-title">照片加载优化</h3><p class="thumbnail-maintenance-desc">${escapeHtml(statusText)}</p></div></div><div class="thumbnail-maintenance-actions"><span class="thumbnail-maintenance-count">已检查 ${imageItems.length} 张照片</span></div>`;
       } else if (state.thumbnailBackfillAttemptedUserId === state.session?.user?.id) {
         const resultText = state.thumbnailBackfillFailed
           ? `本次自动处理完成：成功 ${state.thumbnailBackfillCompleted} 张，${state.thumbnailBackfillFailed} 张失败。未完成的照片会在下次管理员登录时自动重试。`
-          : `还有 ${missing} 张旧照片缺少缩略图；系统会在下次管理员登录时自动继续处理。`;
-        panel.innerHTML = `<div class="thumbnail-maintenance-head"><div class="thumbnail-maintenance-icon">!</div><div><h3 class="thumbnail-maintenance-title">旧照片缩略图待补齐</h3><p class="thumbnail-maintenance-desc">${escapeHtml(resultText)}</p></div></div><div class="thumbnail-maintenance-actions"><span class="thumbnail-maintenance-count">共 ${imageItems.length} 张照片 · ${imageItems.length - missing} 张已有缩略图</span></div>`;
+          : `还有 ${missing} 张旧照片缺少缩略图或高清预览图；系统会在下次管理员登录时自动继续处理。`;
+        panel.innerHTML = `<div class="thumbnail-maintenance-head"><div class="thumbnail-maintenance-icon">!</div><div><h3 class="thumbnail-maintenance-title">旧照片缩略图待补齐</h3><p class="thumbnail-maintenance-desc">${escapeHtml(resultText)}</p></div></div><div class="thumbnail-maintenance-actions"><span class="thumbnail-maintenance-count">共 ${imageItems.length} 张照片 · ${imageItems.length - missing} 张展示版本齐全</span></div>`;
       } else {
-        panel.innerHTML = `<div class="thumbnail-maintenance-head"><div class="thumbnail-maintenance-icon">↧</div><div><h3 class="thumbnail-maintenance-title">正在准备自动优化</h3><p class="thumbnail-maintenance-desc">发现 ${missing} 张旧照片还没有缩略图。系统会在管理员登录后自动逐张生成，无需点击按钮；原始照片不会被删除。</p></div></div><div class="thumbnail-maintenance-actions"><span class="thumbnail-maintenance-count">共 ${imageItems.length} 张照片 · ${imageItems.length - missing} 张已有缩略图</span></div>`;
+        panel.innerHTML = `<div class="thumbnail-maintenance-head"><div class="thumbnail-maintenance-icon">↧</div><div><h3 class="thumbnail-maintenance-title">正在准备自动优化</h3><p class="thumbnail-maintenance-desc">发现 ${missing} 张旧照片还没有缩略图或高清预览图。系统会在管理员登录后自动逐张生成，无需点击按钮；原始照片不会被删除。</p></div></div><div class="thumbnail-maintenance-actions"><span class="thumbnail-maintenance-count">共 ${imageItems.length} 张照片 · ${imageItems.length - missing} 张展示版本齐全</span></div>`;
       }
     }
 
@@ -820,10 +861,14 @@
         $("#loginBtn").hidden = false; $("#loginBtn").disabled = true; $("#loginBtn").textContent = "连接中…";
         $("#logoutBtn").hidden = true; $("#authUser").hidden = true;
       } else {
-        status.innerHTML = `<i class="status-dot" style="background:${state.cloudError ? '#a94f3b' : '#b9a06a'}"></i><span>${state.cloudError ? '云端暂不可用' : '公开展示 · 待连接云端'}</span>`;
+        const configured = Boolean(window.ALBUM_CONFIG?.SUPABASE_URL && window.ALBUM_CONFIG?.SUPABASE_ANON_KEY);
+        const statusText = state.cloudError ? "管理服务暂不可用" : configured ? "公开浏览 · 管理服务按需加载" : "公开展示 · 待连接云端";
+        status.innerHTML = `<i class="status-dot" style="background:${state.cloudError ? '#a94f3b' : '#b9a06a'}"></i><span>${statusText}</span>`;
         $("#storageNote").innerHTML = state.cloudError
-          ? '<span class="note-icon">✳</span><div><strong>云端暂时连接失败</strong><br>公开照片列表独立加载；管理员管理服务暂不可用。请检查网络后重试管理员登录。</div>'
-          : '<span class="note-icon">✳</span><div><strong>公开展示模式</strong><br>网页可以公开访问。请先按 README 配置 Supabase，连接后所有访客即可看到云端相册，只有管理员账号可以管理影像。未配置云端前，上传与修改功能会保持关闭。</div>';
+          ? '<span class="note-icon">✳</span><div><strong>管理服务暂时连接失败</strong><br>普通访客浏览不依赖管理员脚本；需要管理时请检查网络后再试。</div>'
+          : configured
+            ? '<span class="note-icon">✳</span><div><strong>公开浏览模式</strong><br>照片目录通过轻量接口读取。为加快首次访问，管理员身份验证脚本只会在点击“管理员登录”时加载。</div>'
+            : '<span class="note-icon">✳</span><div><strong>公开展示模式</strong><br>网页可以公开访问。请先按 README 配置 Supabase；未配置云端前，上传与修改功能会保持关闭。</div>';
         $("#loginBtn").hidden = false; $("#loginBtn").disabled = false; $("#loginBtn").textContent = "管理员登录";
         $("#logoutBtn").hidden = true; $("#authUser").hidden = true;
       }
@@ -892,13 +937,15 @@
         if (!inLocation.length) {
           mediaGrid.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><span class="empty-icon">${admin ? "＋" : "◇"}</span><strong>${admin ? (loc.day === 0 ? (state.type === "video" ? "为旅途收藏一段视频" : state.type === "image" ? "收下这张车窗风景" : "把启程时的记忆放在这里") : loc.day === 5 ? (state.type === "video" ? "收下一段旅途片段" : state.type === "image" ? "收藏一张随手拍" : "把零散的旅行记忆放在这里") : (state.type === "video" ? "为这一站添加一段视频" : state.type === "image" ? "为这一站添一张照片" : "把旅途记忆放在这里")) : "影像正在慢慢收集"}</strong><span>${admin ? "支持常见照片与视频格式，也可随后编辑说明" : "此处将展示管理员整理的旅行照片与视频"}</span></div>`;
         } else {
-          const desktopPreviewLimit = 6;
-          inLocation.forEach((item, index) => {
+          const initialVisibleCount = 6;
+          const isExpanded = state.expandedLocations.has(loc.id);
+          const visibleItems = isExpanded ? inLocation : inLocation.slice(0, initialVisibleCount);
+          visibleItems.forEach((item, index) => {
             const mediaUrl = item.public_url || (item.blob ? URL.createObjectURL(item.blob) : "");
-            const thumbnailUrl = item.thumbnail_url || mediaUrl;
+            const thumbnailUrl = (!item.thumbnail_unavailable && item.thumbnail_url) || (!item.preview_unavailable && item.preview_url) || mediaUrl;
             if (item.blob && mediaUrl) state.objectUrls.push(mediaUrl);
             const tile = document.createElement("div");
-            tile.className = `media-tile${index >= desktopPreviewLimit ? " is-overflow" : ""}`;
+            tile.className = "media-tile";
             const prioritizeImage = item.media_type === "image" && !firstImagePrioritized;
             if (prioritizeImage) firstImagePrioritized = true;
             const mediaElement = item.media_type === "video"
@@ -907,10 +954,28 @@
             const adminTools = admin ? `<div class="media-admin-tools"><button class="media-action" type="button" data-edit="${escapeHtml(item.id)}" title="编辑名称和说明" aria-label="编辑名称和说明">✎</button><button class="media-action" type="button" data-replace="${escapeHtml(item.id)}" title="替换照片或视频" aria-label="替换照片或视频">↻</button><button class="media-action media-action-delete" type="button" data-delete="${escapeHtml(item.id)}" title="删除此影像" aria-label="删除此影像">×</button></div>` : "";
             tile.innerHTML = `<button class="media-open" type="button" data-preview="${escapeHtml(item.id)}" aria-label="预览${escapeHtml(item.name)}">${mediaElement}</button>${adminTools}<div class="media-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</div>`;
             mediaGrid.appendChild(tile);
+            const tileImage = tile.querySelector("img");
+            if (tileImage && item.media_type === "image") {
+              const fallbacks = [item.preview_url, item.public_url].filter((url, idx, all) => url && url !== tileImage.src && all.indexOf(url) === idx);
+              tileImage.dataset.fallbackIndex = "0";
+              tileImage.addEventListener("error", () => {
+                if (item.thumbnail_url && tileImage.src === item.thumbnail_url) flagImageVariantUnavailable(item, "thumbnail_unavailable");
+                if (item.preview_url && tileImage.src === item.preview_url) flagImageVariantUnavailable(item, "preview_unavailable");
+                const fallbackIndex = Number(tileImage.dataset.fallbackIndex || 0);
+                if (fallbackIndex < fallbacks.length) {
+                  tileImage.dataset.fallbackIndex = String(fallbackIndex + 1);
+                  tileImage.src = fallbacks[fallbackIndex];
+                } else {
+                  tileImage.classList.add("image-load-failed");
+                  tileImage.alt = "照片暂时无法加载";
+                }
+              });
+            }
           });
-          if (inLocation.length > 6) {
+          if (inLocation.length > initialVisibleCount) {
             expandButton.hidden = false;
-            expandButton.textContent = `查看全部 ${inLocation.length} 段影像 ↓`;
+            expandButton.setAttribute("aria-expanded", String(isExpanded));
+            expandButton.textContent = isExpanded ? "收起较晚影像 ↑" : `查看全部 ${inLocation.length} 段影像 ↓`;
           }
         }
         albumGrid.appendChild(card);
@@ -923,12 +988,14 @@
       albumGrid.querySelectorAll("[data-delete]").forEach((button) => button.addEventListener("click", () => deleteMedia(button.dataset.delete)));
       albumGrid.querySelectorAll("[data-expand-media]").forEach((button) => button.addEventListener("click", () => {
         const locId = button.dataset.expandMedia;
-        const mediaGrid = albumGrid.querySelector(`[data-media-grid="${locId}"]`);
-        if (!mediaGrid) return;
-        const expanded = mediaGrid.classList.toggle("is-expanded");
-        button.setAttribute("aria-expanded", String(expanded));
-        button.textContent = expanded ? "收起较晚影像 ↑" : `查看全部 ${button.dataset.total} 段影像 ↓`;
+        if (state.expandedLocations.has(locId)) state.expandedLocations.delete(locId);
+        else state.expandedLocations.add(locId);
+        renderGallery();
       }));
+    }
+
+    function mediaSignature(items) {
+      return JSON.stringify((items || []).map((item) => [item.id, item.location_id, item.day, item.name, item.media_type, item.storage_path, item.thumbnail_path || "", item.preview_path || "", Boolean(item.thumbnail_unavailable), Boolean(item.preview_unavailable), item.caption || "", item.created_at, item.user_id || ""]));
     }
 
     async function loadMedia(options = {}) {
@@ -941,15 +1008,16 @@
         const requestTimer = setTimeout(() => controller.abort(), 6500);
         let result;
         try {
-          result = await state.supabase.from("travel_media")
-            .select("id,location_id,day,name,media_type,storage_path,thumbnail_path,caption,created_at,user_id")
+          const selectWith = (columns) => state.supabase.from("travel_media")
+            .select(columns)
             .order("created_at", { ascending: true }).order("id", { ascending: true })
             .abortSignal(controller.signal);
+          result = await selectWith("id,location_id,day,name,media_type,storage_path,thumbnail_path,preview_path,caption,created_at,user_id");
+          if (result.error && /preview_path|column .* does not exist/i.test(result.error.message || "")) {
+            result = await selectWith("id,location_id,day,name,media_type,storage_path,thumbnail_path,caption,created_at,user_id");
+          }
           if (result.error && /thumbnail_path|column .* does not exist/i.test(result.error.message || "")) {
-            result = await state.supabase.from("travel_media")
-              .select("id,location_id,day,name,media_type,storage_path,caption,created_at,user_id")
-              .order("created_at", { ascending: true }).order("id", { ascending: true })
-              .abortSignal(controller.signal);
+            result = await selectWith("id,location_id,day,name,media_type,storage_path,caption,created_at,user_id");
           }
         } catch (error) {
           if (controller.signal.aborted) throw new Error("读取云端相册超过 6.5 秒，已停止等待。请检查网络后刷新重试。");
@@ -964,10 +1032,13 @@
         renderGallery();
         return;
       }
+      const wasError = state.mediaError;
+      const nextMedia = normalizeMediaRows(data);
+      const changed = mediaSignature(state.media) !== mediaSignature(nextMedia);
       state.mediaError = false;
-      state.media = normalizeMediaRows(data);
+      state.media = nextMedia;
       writeMediaCache(data);
-      renderGallery();
+      if (changed || wasError) renderGallery();
       if (state.cloud) updateModeUI();
       if (isAdminSession()) maybeAutoGenerateMissingThumbnails();
     }
@@ -1010,7 +1081,7 @@
         for (const originalFile of accepted) {
           const id = makeId();
           const mediaType = originalFile.type.startsWith("video/") ? "video" : "image";
-          const variants = mediaType === "image" ? await prepareImageVariants(originalFile) : { mainFile: originalFile, thumbnailBlob: null };
+          const variants = mediaType === "image" ? await prepareImageVariants(originalFile) : { mainFile: originalFile, previewBlob: null, thumbnailBlob: null };
           const file = variants.mainFile || originalFile;
           const createdAt = new Date().toISOString();
           const bucket = window.ALBUM_CONFIG.BUCKET || "luoyang-travel-album";
@@ -1020,28 +1091,41 @@
           if (uploaded.error) throw uploaded.error;
 
           let thumbnailPath = null;
+          let previewPath = null;
+          const uploadedVariantPaths = [];
           if (mediaType === "image" && variants.thumbnailBlob) {
-            const thumbExt = variants.thumbnailBlob.type === "image/jpeg" ? "jpg" : "webp";
+            const thumbExt = variantExtension(variants.thumbnailBlob);
             thumbnailPath = `${userId}/thumbs/${id}.${thumbExt}`;
             const thumbUpload = await state.supabase.storage.from(bucket).upload(thumbnailPath, variants.thumbnailBlob, { cacheControl: "31536000", upsert: false, contentType: variants.thumbnailBlob.type || "image/webp" });
             if (thumbUpload.error) {
-              console.warn("缩略图上传失败，继续保存高清照片：", thumbUpload.error);
-              thumbnailFailures++;
+              console.warn("缩略图上传失败，继续保存照片：", thumbUpload.error);
               thumbnailPath = null;
-            }
-          } else if (mediaType === "image") {
-            thumbnailFailures++;
+            } else uploadedVariantPaths.push(thumbnailPath);
           }
+          if (mediaType === "image" && variants.previewBlob) {
+            const previewExt = variantExtension(variants.previewBlob);
+            previewPath = `${userId}/previews/${id}.${previewExt}`;
+            const previewUpload = await state.supabase.storage.from(bucket).upload(previewPath, variants.previewBlob, { cacheControl: "31536000", upsert: false, contentType: variants.previewBlob.type || "image/webp" });
+            if (previewUpload.error) {
+              console.warn("高清预览图上传失败，将点击后直接读取原图：", previewUpload.error);
+              previewPath = null;
+            } else uploadedVariantPaths.push(previewPath);
+          }
+          if (mediaType === "image" && (!thumbnailPath || !previewPath)) thumbnailFailures++;
 
-          const inserted = await state.supabase.from("travel_media").insert({ id, location_id: loc.id, day: loc.day, name: originalFile.name, media_type: mediaType, storage_path: path, thumbnail_path: thumbnailPath, caption: "", user_id: userId, created_at: createdAt });
+          const inserted = await state.supabase.from("travel_media").insert({ id, location_id: loc.id, day: loc.day, name: originalFile.name, media_type: mediaType, storage_path: path, thumbnail_path: thumbnailPath, preview_path: previewPath, caption: "", user_id: userId, created_at: createdAt });
           if (inserted.error) {
-            await state.supabase.storage.from(bucket).remove([path, ...(thumbnailPath ? [thumbnailPath] : [])]);
+            await state.supabase.storage.from(bucket).remove([path, ...uploadedVariantPaths]);
             throw inserted.error;
           }
         }
         await loadMedia();
         updateModeUI();
-        showToast(thumbnailFailures ? `已保存 ${accepted.length} 个文件；${thumbnailFailures} 张照片未生成缩略图` : `已为「${loc.day === 0 ? "车窗手记" : loc.name}」收藏 ${accepted.length} 个文件`);
+        if (thumbnailFailures) {
+          state.thumbnailBackfillAttemptedUserId = null;
+          maybeAutoGenerateMissingThumbnails();
+        }
+        showToast(thumbnailFailures ? `已保存 ${accepted.length} 个文件；${thumbnailFailures} 张照片的展示图正在自动补齐` : `已为「${loc.day === 0 ? "车窗手记" : loc.name}」收藏 ${accepted.length} 个文件`);
       } catch (error) {
         console.error(error);
         showToast(error.message || "上传失败，请稍后重试");
@@ -1057,17 +1141,18 @@
       if (!(file.type.startsWith("image/") || file.type.startsWith("video/"))) { showToast("请选择照片或视频文件"); return; }
       const bucket = window.ALBUM_CONFIG.BUCKET || "luoyang-travel-album";
       const nextType = file.type.startsWith("video/") ? "video" : "image";
-      const variants = nextType === "image" ? await prepareImageVariants(file) : { mainFile: file, thumbnailBlob: null };
+      const variants = nextType === "image" ? await prepareImageVariants(file) : { mainFile: file, previewBlob: null, thumbnailBlob: null };
       const uploadFile = variants.mainFile || file;
       const id = makeId();
       const nextPath = `${state.session.user.id}/${id}-${safeFileName(uploadFile.name)}`;
       let nextThumbnailPath = null;
+      let nextPreviewPath = null;
       try {
         showToast("正在优化并替换影像…");
         const uploaded = await state.supabase.storage.from(bucket).upload(nextPath, uploadFile, { cacheControl: "31536000", upsert: false, contentType: uploadFile.type || undefined });
         if (uploaded.error) throw uploaded.error;
         if (nextType === "image" && variants.thumbnailBlob) {
-          const thumbExt = variants.thumbnailBlob.type === "image/jpeg" ? "jpg" : "webp";
+          const thumbExt = variantExtension(variants.thumbnailBlob);
           nextThumbnailPath = `${state.session.user.id}/thumbs/${id}.${thumbExt}`;
           const thumbUpload = await state.supabase.storage.from(bucket).upload(nextThumbnailPath, variants.thumbnailBlob, { cacheControl: "31536000", upsert: false, contentType: variants.thumbnailBlob.type || "image/webp" });
           if (thumbUpload.error) {
@@ -1075,22 +1160,53 @@
             nextThumbnailPath = null;
           }
         }
-        const updated = await state.supabase.from("travel_media").update({ name: file.name, media_type: nextType, storage_path: nextPath, thumbnail_path: nextThumbnailPath, caption: item.caption || "" }).eq("id", item.id);
+        if (nextType === "image" && variants.previewBlob) {
+          const previewExt = variantExtension(variants.previewBlob);
+          nextPreviewPath = `${state.session.user.id}/previews/${id}.${previewExt}`;
+          const previewUpload = await state.supabase.storage.from(bucket).upload(nextPreviewPath, variants.previewBlob, { cacheControl: "31536000", upsert: false, contentType: variants.previewBlob.type || "image/webp" });
+          if (previewUpload.error) {
+            console.warn("替换影像的高清预览图上传失败，将继续使用原图预览：", previewUpload.error);
+            nextPreviewPath = null;
+          }
+        }
+        const updated = await state.supabase.from("travel_media").update({ name: file.name, media_type: nextType, storage_path: nextPath, thumbnail_path: nextThumbnailPath, preview_path: nextPreviewPath, caption: item.caption || "" }).eq("id", item.id);
         if (updated.error) {
-          await state.supabase.storage.from(bucket).remove([nextPath, ...(nextThumbnailPath ? [nextThumbnailPath] : [])]);
+          await state.supabase.storage.from(bucket).remove([nextPath, ...[nextThumbnailPath, nextPreviewPath].filter(Boolean)]);
           throw updated.error;
         }
-        const oldPaths = [item.storage_path, item.thumbnail_path].filter(Boolean);
+        const oldPaths = [item.storage_path, item.thumbnail_path, item.preview_path].filter(Boolean);
         if (oldPaths.length) {
           const removed = await state.supabase.storage.from(bucket).remove(oldPaths);
           if (removed.error) console.warn("新影像已生效，但旧文件清理失败：", removed.error);
         }
         await loadMedia();
         updateModeUI();
-        showToast(nextType === "image" && !nextThumbnailPath ? "照片已替换，但缩略图生成失败" : "影像已替换");
+        if (nextType === "image" && (!nextThumbnailPath || !nextPreviewPath)) {
+          state.thumbnailBackfillAttemptedUserId = null;
+          maybeAutoGenerateMissingThumbnails();
+        }
+        showToast(nextType === "image" && (!nextThumbnailPath || !nextPreviewPath) ? "照片已替换，缺失的展示版本正在自动补齐" : "影像已替换");
       } catch (error) {
         console.error(error);
         showToast(error.message || "替换失败，请检查管理员权限和云端配置");
+      }
+    }
+
+    // HEAD checks verify that saved derivative paths point to real, publicly readable objects
+    // without downloading the entire image. Unknown/network failures are not treated as missing.
+    async function checkPublicObjectAvailability(url, timeoutMs = 4500) {
+      if (!url) return false;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(url, { method: "HEAD", cache: "no-store", signal: controller.signal });
+        if (response.ok) return true;
+        if ([401, 403, 404].includes(response.status)) return false;
+        return null;
+      } catch {
+        return null;
+      } finally {
+        clearTimeout(timer);
       }
     }
 
@@ -1098,94 +1214,182 @@
       if (!requireAdmin() || state.thumbnailBackfillRunning) return;
       const userId = state.session?.user?.id;
       if (!userId) return;
-      const missing = state.media.filter((item) => item.media_type === "image" && !item.thumbnail_path);
-      if (!missing.length) {
+      const imageItems = state.media.filter((item) => item.media_type === "image");
+      if (!imageItems.length) {
         state.thumbnailBackfillAttemptedUserId = userId;
-        state.thumbnailBackfillStatus = `检查完成：${state.media.filter((item) => item.media_type === "image").length} 张照片均已登记缩略图。`;
+        state.thumbnailBackfillStatus = "当前相册还没有照片需要优化。";
         updateThumbnailMaintenancePanel();
         return;
       }
 
       state.thumbnailBackfillRunning = true;
+      state.thumbnailBackfillStage = "checking";
       state.thumbnailBackfillUserId = userId;
       state.thumbnailBackfillAttemptedUserId = userId;
       state.thumbnailBackfillCompleted = 0;
+      state.thumbnailBackfillVerifyCompleted = 0;
       state.thumbnailBackfillFailed = 0;
-      state.thumbnailBackfillTotal = missing.length;
-      state.thumbnailBackfillStatus = "正在后台逐张处理旧照片";
+      state.thumbnailBackfillTotal = imageItems.length;
+      state.thumbnailBackfillStatus = "正在检查旧照片的缩略图和高清预览图路径";
       updateThumbnailMaintenancePanel();
 
       const bucket = window.ALBUM_CONFIG.BUCKET || "luoyang-travel-album";
-      let completed = 0, failed = 0;
+      let repaired = 0;
+      let failed = 0;
+      let processed = 0;
       try {
-        for (const item of missing) {
-          // Stop safely if the administrator logs out or the account changes mid-run.
+        // Verify current derivative object paths in small concurrent batches. HEAD does not
+        // download the full image. A network/CORS timeout is considered unknown, not broken.
+        const verifyBatchSize = 8;
+        for (let offset = 0; offset < imageItems.length; offset += verifyBatchSize) {
           if (!isAdminSession() || state.session?.user?.id !== userId) break;
+          const batch = imageItems.slice(offset, offset + verifyBatchSize);
+          await Promise.all(batch.map(async (item) => {
+            if (item.thumbnail_path && !item.thumbnail_unavailable) {
+              const ok = await checkPublicObjectAvailability(item.thumbnail_url);
+              if (ok === false) item.thumbnail_unavailable = true;
+            }
+            if (item.preview_path && !item.preview_unavailable) {
+              const ok = await checkPublicObjectAvailability(item.preview_url);
+              if (ok === false) item.preview_unavailable = true;
+            }
+          }));
+          state.thumbnailBackfillVerifyCompleted = Math.min(offset + batch.length, imageItems.length);
+          updateThumbnailMaintenancePanel();
+        }
+
+        if (!isAdminSession() || state.session?.user?.id !== userId) return;
+        state.thumbnailBackfillStage = "repairing";
+        state.thumbnailBackfillStatus = "正在为缺失或失效的展示图生成新版本";
+        updateThumbnailMaintenancePanel();
+
+        for (const item of imageItems) {
+          if (!isAdminSession() || state.session?.user?.id !== userId) break;
+          const needThumbnail = !item.thumbnail_path || item.thumbnail_unavailable;
+          const needPreview = !item.preview_path || item.preview_unavailable;
+          if (!needThumbnail && !needPreview) {
+            processed++;
+            state.thumbnailBackfillCompleted = processed;
+            updateThumbnailMaintenancePanel();
+            continue;
+          }
+
+          const newPaths = [];
+          const oldPaths = [];
           try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 30000);
+            const timeoutId = setTimeout(() => controller.abort(), 60000);
             let response;
             try { response = await fetch(item.public_url, { cache: "force-cache", signal: controller.signal }); }
             finally { clearTimeout(timeoutId); }
             if (!response.ok) throw new Error(`原图下载失败（${response.status}）`);
             const originalBlob = await response.blob();
-            const thumbnailBlob = await createThumbnailBlob(originalBlob, 560);
-            const ext = thumbnailBlob.type === "image/jpeg" ? "jpg" : "webp";
-            const thumbnailPath = `${userId}/thumbs/${item.id}.${ext}`;
-            // Clear a thumbnail left behind by an interrupted previous attempt.
-            await state.supabase.storage.from(bucket).remove([thumbnailPath]).catch(() => {});
-            const uploaded = await state.supabase.storage.from(bucket).upload(thumbnailPath, thumbnailBlob, { cacheControl: "31536000", upsert: false, contentType: thumbnailBlob.type || "image/webp" });
-            if (uploaded.error) throw uploaded.error;
-            const updated = await state.supabase.from("travel_media").update({ thumbnail_path: thumbnailPath }).eq("id", item.id);
-            if (updated.error) {
-              await state.supabase.storage.from(bucket).remove([thumbnailPath]);
-              throw updated.error;
+            const variants = await createImageVariants(originalBlob);
+            const patch = {};
+            const cacheBust = `${item.id}-${Date.now().toString(36)}`;
+
+            if (needThumbnail && variants.thumbnailBlob) {
+              const thumbnailPath = `${userId}/thumbs/${cacheBust}.${variantExtension(variants.thumbnailBlob)}`;
+              const uploaded = await state.supabase.storage.from(bucket).upload(thumbnailPath, variants.thumbnailBlob, { cacheControl: "31536000", upsert: false, contentType: variants.thumbnailBlob.type || "image/webp" });
+              if (uploaded.error) throw uploaded.error;
+              newPaths.push(thumbnailPath);
+              patch.thumbnail_path = thumbnailPath;
+              if (item.thumbnail_path) oldPaths.push(item.thumbnail_path);
             }
-            completed++;
+
+            if (needPreview && variants.previewBlob) {
+              const previewPath = `${userId}/previews/${cacheBust}.${variantExtension(variants.previewBlob)}`;
+              const uploaded = await state.supabase.storage.from(bucket).upload(previewPath, variants.previewBlob, { cacheControl: "31536000", upsert: false, contentType: variants.previewBlob.type || "image/webp" });
+              if (uploaded.error) throw uploaded.error;
+              newPaths.push(previewPath);
+              patch.preview_path = previewPath;
+              if (item.preview_path) oldPaths.push(item.preview_path);
+            }
+            if (!Object.keys(patch).length) throw new Error("浏览器未生成需要的展示版本");
+            const updated = await state.supabase.from("travel_media").update(patch).eq("id", item.id);
+            if (updated.error) throw updated.error;
+
+            if (patch.thumbnail_path) {
+              item.thumbnail_path = patch.thumbnail_path;
+              item.thumbnail_url = publicStorageUrl(patch.thumbnail_path);
+              item.thumbnail_unavailable = false;
+            }
+            if (patch.preview_path) {
+              item.preview_path = patch.preview_path;
+              item.preview_url = publicStorageUrl(patch.preview_path);
+              item.preview_unavailable = false;
+            }
+            // Cleanup is best-effort after the database points to the new files. Do not roll
+            // back new files if removal of old cached paths has a transient network error.
+            if (oldPaths.length) {
+              try {
+                const removed = await state.supabase.storage.from(bucket).remove(oldPaths);
+                if (removed.error) console.warn("新展示图已生效，但旧展示文件清理失败：", removed.error);
+              } catch (cleanupError) {
+                console.warn("新展示图已生效，但清理旧文件时网络失败：", cleanupError);
+              }
+            }
+            repaired++;
           } catch (error) {
+            if (newPaths.length) {
+              try { await state.supabase.storage.from(bucket).remove(newPaths); } catch { /* retry on next maintenance run */ }
+            }
             failed++;
-            console.warn(`为「${item.name}」自动生成缩略图失败：`, error);
+            console.warn(`为「${item.name}」自动生成图片版本失败：`, error);
           }
-          state.thumbnailBackfillCompleted = completed;
+          processed++;
+          state.thumbnailBackfillCompleted = processed;
           state.thumbnailBackfillFailed = failed;
           updateThumbnailMaintenancePanel();
-          // Yield to the browser between images so mobile scrolling and taps remain responsive.
-          await new Promise((resolve) => setTimeout(resolve, 120));
+          // Yield between original-image decodes to keep mobile browsers responsive.
+          await new Promise((resolve) => setTimeout(resolve, 100));
         }
+
         state.thumbnailBackfillStatus = failed
-          ? `本次自动处理完成：成功 ${completed} 张，${failed} 张失败；失败项会在下次管理员登录时自动重试。`
-          : `已自动为 ${completed} 张旧照片生成缩略图，原始照片均已保留。`;
-        if (completed || failed) await loadMedia();
+          ? `已检查 ${processed} / ${imageItems.length} 张照片，补齐 ${repaired} 张，${failed} 张暂时失败；未完成项会在下次登录或刷新时重试。`
+          : repaired
+            ? `已检查 ${processed} 张照片，并为 ${repaired} 张缺失或失效的照片补齐了展示版本；原图均已保留。`
+            : `已检查 ${processed} 张照片，现有缩略图与高清预览图路径均可访问，无需重新生成。`;
+        if (repaired || failed) {
+          await loadMedia();
+          // We updated the in-memory item paths as soon as the database write succeeded,
+          // so loadMedia's signature comparison may consider the response unchanged. Force
+          // one render to swap any visible <img> away from old broken URLs.
+          renderGallery();
+        }
       } catch (error) {
-        state.thumbnailBackfillStatus = `自动生成缩略图暂时中断：${error.message || "云端请求失败"}。刷新或下次管理员登录后会继续检查。`;
-        console.error("自动补齐旧照片缩略图失败：", error);
+        state.thumbnailBackfillStatus = `自动检查/补齐暂时中断：${error.message || "云端请求失败"}。刷新或下次登录后会继续检查。`;
+        console.error("自动补齐旧照片图片版本失败：", error);
       } finally {
+        const retryRequested = state.thumbnailBackfillRetryRequested;
+        state.thumbnailBackfillRetryRequested = false;
         state.thumbnailBackfillRunning = false;
+        state.thumbnailBackfillStage = "";
         state.thumbnailBackfillUserId = null;
         updateModeUI();
+        // Retry once only when new broken paths were discovered during an otherwise clean run.
+        // Repeated upload/decode errors stay queued for the next admin visit instead of looping.
+        if (retryRequested && failed === 0 && isAdminSession()) {
+          state.thumbnailBackfillAttemptedUserId = null;
+          setTimeout(() => maybeAutoGenerateMissingThumbnails(), 700);
+        }
       }
       if (!isAdminSession()) return;
-      if (failed) showToast(`旧照片优化完成：成功 ${completed} 张，${failed} 张未完成；下次登录会自动重试`);
-      else if (completed) showToast(`已自动优化 ${completed} 张旧照片，后续浏览将优先加载缩略图`);
+      if (failed) showToast(`旧照片优化完成：补齐 ${repaired} 张，${failed} 张未完成；下次登录会继续重试`);
+      else if (repaired) showToast(`已为 ${repaired} 张旧照片生成展示版本，原图已保留`);
     }
 
     function maybeAutoGenerateMissingThumbnails() {
       if (!isAdminSession() || !state.media.length) return;
       const userId = state.session?.user?.id;
       if (!userId || state.thumbnailBackfillRunning || state.thumbnailBackfillAttemptedUserId === userId) return;
-      const missing = state.media.some((item) => item.media_type === "image" && !item.thumbnail_path);
-      if (missing) {
-        // Defer just enough for the login state and gallery to settle; no user click is needed.
-        setTimeout(() => {
-          if (isAdminSession() && state.session?.user?.id === userId && !state.thumbnailBackfillRunning && state.thumbnailBackfillAttemptedUserId !== userId) {
-            void generateMissingThumbnails();
-          }
-        }, 350);
-      } else {
-        state.thumbnailBackfillAttemptedUserId = userId;
-        state.thumbnailBackfillStatus = `检查完成：${state.media.filter((item) => item.media_type === "image").length} 张照片均已登记缩略图。`;
-        updateThumbnailMaintenancePanel();
-      }
+      // Run once per admin session/page load: it verifies real storage paths and repairs only
+      // missing or broken derivatives. This also catches stale non-empty DB paths.
+      setTimeout(() => {
+        if (isAdminSession() && state.session?.user?.id === userId && !state.thumbnailBackfillRunning && state.thumbnailBackfillAttemptedUserId !== userId) {
+          void generateMissingThumbnails();
+        }
+      }, 350);
     }
 
     async function saveMediaEdits(event) {
@@ -1218,7 +1422,7 @@
         const bucket = window.ALBUM_CONFIG.BUCKET || "luoyang-travel-album";
         const deleted = await state.supabase.from("travel_media").delete().eq("id", id);
         if (deleted.error) throw deleted.error;
-        const filePaths = [item.storage_path, item.thumbnail_path].filter(Boolean);
+        const filePaths = [item.storage_path, item.thumbnail_path, item.preview_path].filter(Boolean);
         const removed = filePaths.length ? await state.supabase.storage.from(bucket).remove(filePaths) : { error: null };
         if (removed.error) console.warn("记录已删除，但存储文件清理失败：", removed.error);
         await loadMedia(); updateModeUI(); showToast("已删除这段影像");
@@ -1228,17 +1432,129 @@
     function openViewer(id) {
       const item = state.media.find((entry) => entry.id === id); if (!item) return;
       const loc = LOCATIONS.find((entry) => entry.id === item.location_id);
-      // 预览标题只显示景点名称，不显示照片文件名。
+      state.currentViewerMediaId = id;
+      state.viewerOriginalRequested = false;
       $("#viewerTitle").textContent = `${loc?.name || "旅行相册"}`;
       $("#viewerCaption").textContent = `${loc ? (loc.day === 0 ? `旅途中 · ${loc.name}` : loc.day === 5 ? `杂项 · ${loc.name}` : `第 ${loc.day} 日 · ${loc.name}`) : "旅途中"} · ${formatDate(item.created_at)}${item.caption ? ` · ${item.caption}` : ""}`;
+      if (!viewerDialog.open) viewerDialog.showModal();
       const mediaUrl = item.public_url || (item.blob ? URL.createObjectURL(item.blob) : "");
       if (item.blob && mediaUrl) state.objectUrls.push(mediaUrl);
-      $("#viewerMedia").innerHTML = item.media_type === "video" ? `<video src="${escapeHtml(mediaUrl)}" controls autoplay playsinline></video>` : `<img src="${escapeHtml(mediaUrl)}" alt="${escapeHtml(item.name)}" />`;
-      viewerDialog.showModal();
+      const mediaContainer = $("#viewerMedia");
+      const actions = $("#viewerActions");
+      if (item.media_type === "video") {
+        mediaContainer.innerHTML = `<video src="${escapeHtml(mediaUrl)}" controls autoplay playsinline preload="metadata"></video>`;
+        actions.hidden = true;
+        $("#viewerLoadStatus").textContent = "";
+        return;
+      }
+
+      actions.hidden = false;
+      $("#viewerOriginalBtn").disabled = false;
+      $("#viewerDownloadBtn").disabled = false;
+      const thumbnailUrl = (!item.thumbnail_unavailable && item.thumbnail_url) || "";
+      const previewUrl = (!item.preview_unavailable && item.preview_url) || "";
+      const initialUrl = thumbnailUrl || previewUrl || mediaUrl;
+      const tried = new Set();
+      let displayedRank = -1;
+      $("#viewerLoadStatus").textContent = initialUrl === thumbnailUrl && previewUrl ? "已显示缩略图，正在加载高清预览…" : "正在加载照片…";
+
+      const rankOf = (url) => url === thumbnailUrl ? 0 : url === previewUrl ? 1 : 2;
+      const markUnavailable = (url) => {
+        if (item.thumbnail_url && url === item.thumbnail_url) flagImageVariantUnavailable(item, "thumbnail_unavailable");
+        if (item.preview_url && url === item.preview_url) flagImageVariantUnavailable(item, "preview_unavailable");
+      };
+      const requestAndDisplay = (url, showImmediately = false) => {
+        if (!url || tried.has(url)) return;
+        tried.add(url);
+        const rank = rankOf(url);
+        const probe = new Image();
+        probe.alt = "旅行照片";
+        probe.decoding = "async";
+        if (showImmediately) {
+          // Attach the thumbnail to the modal right away; the browser can paint it as soon as
+          // it is decoded, while the larger preview downloads independently in the background.
+          mediaContainer.replaceChildren(probe);
+          displayedRank = rank;
+        }
+        probe.onload = () => {
+          if (state.currentViewerMediaId !== id || state.viewerOriginalRequested || !viewerDialog.open) return;
+          if (rank >= displayedRank) {
+            mediaContainer.replaceChildren(probe);
+            displayedRank = rank;
+            $("#viewerLoadStatus").textContent = rank === 0 ? "已显示缩略图" : rank === 1 ? "高清预览已加载" : "原图已加载";
+          }
+        };
+        probe.onerror = () => {
+          if (state.currentViewerMediaId !== id || state.viewerOriginalRequested || !viewerDialog.open) return;
+          markUnavailable(url);
+          if (url === thumbnailUrl) {
+            requestAndDisplay(previewUrl || mediaUrl);
+          } else if (url === previewUrl) {
+            requestAndDisplay(mediaUrl);
+          } else {
+            $("#viewerLoadStatus").textContent = "照片暂时无法加载，请检查网络后重试";
+          }
+        };
+        probe.src = url;
+      };
+
+      requestAndDisplay(initialUrl, true);
+      // Load the preview in parallel with the thumbnail. The already visible thumbnail remains
+      // on screen until the larger version finishes decoding.
+      if (previewUrl && previewUrl !== initialUrl) requestAndDisplay(previewUrl);
+      else if (!previewUrl && mediaUrl && mediaUrl !== initialUrl) requestAndDisplay(mediaUrl);
+    }
+
+    function viewOriginalInViewer() {
+      const item = state.media.find((entry) => entry.id === state.currentViewerMediaId);
+      if (!item || item.media_type !== "image") return;
+      state.viewerOriginalRequested = true;
+      $("#viewerOriginalBtn").disabled = true;
+      $("#viewerLoadStatus").textContent = "正在加载原始文件…";
+      const probe = new Image();
+      probe.decoding = "async";
+      probe.onload = () => {
+        if (state.currentViewerMediaId !== item.id || !viewerDialog.open) return;
+        probe.alt = "旅行照片";
+        $("#viewerMedia").replaceChildren(probe);
+        $("#viewerLoadStatus").textContent = "已显示原图";
+        $("#viewerOriginalBtn").disabled = false;
+      };
+      probe.onerror = () => {
+        if (state.currentViewerMediaId === item.id) {
+          $("#viewerLoadStatus").textContent = "原图暂时无法加载，请检查网络后重试";
+          $("#viewerOriginalBtn").disabled = false;
+        }
+      };
+      probe.src = item.public_url;
+    }
+
+    async function downloadOriginalFromViewer() {
+      const item = state.media.find((entry) => entry.id === state.currentViewerMediaId);
+      if (!item || item.media_type !== "image") return;
+      const button = $("#viewerDownloadBtn");
+      button.disabled = true;
+      $("#viewerLoadStatus").textContent = "正在准备原图下载…";
+      try {
+        const response = await fetch(item.public_url, { cache: "force-cache" });
+        if (!response.ok) throw new Error(`下载失败（${response.status}）`);
+        const blob = await response.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = objectUrl;
+        link.download = item.name || `travel-photo-${item.id}`;
+        document.body.appendChild(link); link.click(); link.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
+        $("#viewerLoadStatus").textContent = "已开始下载原图";
+      } catch (error) {
+        console.warn("原图下载失败：", error);
+        window.open(item.public_url, "_blank", "noopener");
+        $("#viewerLoadStatus").textContent = "已在新标签页打开原图；可通过浏览器保存";
+      } finally { button.disabled = false; }
     }
 
     async function setupAuth() {
-      if (!state.cloud) return;
+      if (!state.cloud || state.authReady) return;
       const { data } = await state.supabase.auth.getSession();
       state.session = isAdminSession(data.session) ? data.session : null;
       if (data.session && !state.session) await state.supabase.auth.signOut();
@@ -1256,13 +1572,39 @@
         updateModeUI(); renderGallery();
         if (isAdminSession()) maybeAutoGenerateMissingThumbnails();
       });
+      state.authReady = true;
       updateModeUI();
+      renderGallery();
       if (isAdminSession()) maybeAutoGenerateMissingThumbnails();
     }
-    $("#loginBtn").addEventListener("click", () => {
-      if (!state.cloud) {
-        showToast("请先按 README 配置 Supabase 云端相册，再启用管理员登录");
+    $("#loginBtn").addEventListener("click", async () => {
+      const cfg = window.ALBUM_CONFIG || {};
+      if (!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY) {
+        showToast("请先完成 Supabase 云端配置，再启用管理员登录");
         return;
+      }
+      if (!state.supabase) {
+        state.connecting = true;
+        state.cloudError = false;
+        updateModeUI();
+        try {
+          await initCloud();
+          state.connecting = false;
+          await setupAuth();
+          state.cloudError = false;
+          updateModeUI();
+          if (isAdminSession()) {
+            showToast("已恢复管理员登录状态");
+            return;
+          }
+        } catch (error) {
+          state.connecting = false;
+          state.cloudError = true;
+          console.error("管理员登录服务加载失败：", error);
+          updateModeUI();
+          showToast(error.message || "管理员登录服务暂不可用，请检查网络后重试");
+          return;
+        }
       }
       authDialog.showModal();
     });
@@ -1308,50 +1650,31 @@
     });
     viewerDialog.addEventListener("click", (event) => { if (event.target === viewerDialog) viewerDialog.close(); });
     authDialog.addEventListener("click", (event) => { if (event.target === authDialog) authDialog.close(); });
-    viewerDialog.addEventListener("close", () => { $("#viewerMedia").innerHTML = ""; });
+    $("#viewerOriginalBtn").addEventListener("click", viewOriginalInViewer);
+    $("#viewerDownloadBtn").addEventListener("click", downloadOriginalFromViewer);
+    viewerDialog.addEventListener("close", () => {
+      $("#viewerMedia").innerHTML = "";
+      state.currentViewerMediaId = null;
+      state.viewerOriginalRequested = false;
+      $("#viewerActions").hidden = true;
+      $("#viewerLoadStatus").textContent = "";
+    });
 
     async function init() {
-      // First paint: use recently cached public metadata immediately, then refresh it.
-      // Public photo listing uses direct PostgREST fetch in parallel with SDK loading,
-      // so a blocked CDN can no longer hold the first photos hostage.
+      // Public visitors only need the lightweight REST directory; the authentication SDK
+      // is loaded on demand when someone clicks the administrator login button.
       const cachedMedia = readMediaCache();
       if (cachedMedia && cachedMedia.length) state.media = cachedMedia;
       renderGallery();
-      state.connecting = Boolean(window.ALBUM_CONFIG && window.ALBUM_CONFIG.SUPABASE_URL && window.ALBUM_CONFIG.SUPABASE_ANON_KEY);
+      state.connecting = false;
       updateModeUI();
-
-      const mediaTask = (async () => {
-        try {
-          await loadMedia({ preferRest: true });
-        } catch (error) {
-          console.error("公共相册列表读取失败：", error);
-          state.mediaError = true;
-          renderGallery();
-          if (!state.media.length) showToast("云端照片目录连接失败，请检查网络后重试");
-        }
-      })();
-
-      const authTask = (async () => {
-        try {
-          await initCloud();
-          state.connecting = false;
-          state.cloudError = false;
-          await setupAuth();
-          updateModeUI();
-          renderGallery();
-        } catch (error) {
-          state.connecting = false;
-          state.cloudError = true;
-          console.error("管理员服务初始化失败（公开照片列表仍可独立读取）：", error);
-          updateModeUI();
-        }
-      })();
-
-      await Promise.allSettled([mediaTask, authTask]);
-      // If the direct REST route failed but the SDK came up, retry once using SDK.
-      if (state.mediaError && state.cloud) {
-        try { await loadMedia(); }
-        catch (error) { console.error("SDK 备用相册读取也失败：", error); }
+      try {
+        await loadMedia({ preferRest: true });
+      } catch (error) {
+        console.error("公共相册列表读取失败：", error);
+        state.mediaError = true;
+        renderGallery();
+        if (!state.media.length) showToast("云端照片目录连接失败，请检查网络后重试");
       }
       updateModeUI();
     }
