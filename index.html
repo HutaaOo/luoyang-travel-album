@@ -1228,7 +1228,8 @@
     function openViewer(id) {
       const item = state.media.find((entry) => entry.id === id); if (!item) return;
       const loc = LOCATIONS.find((entry) => entry.id === item.location_id);
-      $("#viewerTitle").textContent = `${loc?.name || "旅行相册"} · ${item.name}`;
+      // 预览标题只显示景点名称，不显示照片文件名。
+      $("#viewerTitle").textContent = `${loc?.name || "旅行相册"}`;
       $("#viewerCaption").textContent = `${loc ? (loc.day === 0 ? `旅途中 · ${loc.name}` : loc.day === 5 ? `杂项 · ${loc.name}` : `第 ${loc.day} 日 · ${loc.name}`) : "旅途中"} · ${formatDate(item.created_at)}${item.caption ? ` · ${item.caption}` : ""}`;
       const mediaUrl = item.public_url || (item.blob ? URL.createObjectURL(item.blob) : "");
       if (item.blob && mediaUrl) state.objectUrls.push(mediaUrl);
