@@ -265,7 +265,7 @@
       .location-card { min-height: 0; }
       .card-cover { height: 178px; }
       .media-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
-      .media-expand { display: none !important; }
+      .media-expand:not([hidden]) { display: inline-flex; width: 100%; min-height: 42px; margin-top: 12px; font-size: 12px; }
       .footer-inner { align-items: flex-start; flex-direction: column; }
       .footer-right { text-align: left; }
     }
